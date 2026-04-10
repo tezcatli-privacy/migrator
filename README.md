@@ -22,6 +22,7 @@ The MVP keeps the contract surface intentionally small:
 - `TezcatliVaultCoordinator.sol`: operator-controlled coordinator for strategy deploy/redeem actions
 - `TezcatliStrategyAdapterERC4626.sol`: ERC-4626 adapter that isolates strategy interactions from vault logic
 - `TezcatliStrategyAdapterAaveV3.sol`: Aave V3 adapter for USDC-style settlement assets (with proportional yield redemption)
+- `TezcatliStrategyAdapterYearn.sol`: Yearn-style ERC-4626 adapter for USDC vault strategies
 - `TezcatliStrategyRiskPolicy.sol`: per-vault/per-strategy risk policy engine enforced by the coordinator
 - `TezcatliVaultFeeModel.sol`: bonding-curve fee model (5.00% -> 0.50%) across 3/6/12/18 month options
 - `TezcatliGmxPrivacyWrapper.sol`: stealth-signature relay wrapper for GMX `ExchangeRouter.multicall(...)` order submission
@@ -195,6 +196,7 @@ The test suite currently covers:
 - risk-policy validation in coordinator (slippage + leverage + allocation checks)
 - critical settlement start/clear workflow between coordinator and vault
 - Aave V3 adapter deposit/redeem behavior with proportional yield accounting
+- Yearn adapter deposit/redeem behavior with yield accrual and slippage bounds
 - end-to-end paymaster-sponsored confidential transfer after migration to a 4337 account
 - recipient-side decryption with `decryptForView(...)`
 - post-migration confidential transfers
