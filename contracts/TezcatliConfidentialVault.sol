@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { FHE, ebool, euint64, InEuint64 } from "@fhenixprotocol/cofhe-contracts/FHE.sol";
+import { FHE, ebool, euint64 } from "@fhenixprotocol/cofhe-contracts/FHE.sol";
 import { FHESafeMath } from "fhenix-confidential-contracts/contracts/utils/FHESafeMath.sol";
 import { IFHERC20Receiver } from "fhenix-confidential-contracts/contracts/interfaces/IFHERC20Receiver.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -44,6 +44,8 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     address public feeRecipient;
     uint64 public minWithdrawDelay;
     uint256 public strategyShares;
+    mapping(address => bool) public approvedStrategyAdapters;
+    mapping(address => uint256) public strategySharesByAdapter;
 
     mapping(address => euint64) private _confidentialShares;
     euint64 private _totalConfidentialShares;
@@ -51,18 +53,20 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     mapping(address => uint64) private _lockStartByUser;
     mapping(address => uint64) private _withdrawUnlockAtByUser;
     mapping(address => bool) private _hasLockOption;
+    mapping(address => bool) private _hasActivePosition;
 
     event DepositRecorded(address indexed sender, address indexed beneficiary, euint64 amount);
     event WithdrawalExecuted(address indexed owner, address indexed recipient, euint64 amount);
     event CoordinatorUpdated(address indexed previousCoordinator, address indexed newCoordinator);
     event StrategyAdapterUpdated(address indexed previousAdapter, address indexed newAdapter);
+    event StrategyAdapterApprovalUpdated(address indexed adapter, bool approved);
     event FeeModelUpdated(address indexed previousFeeModel, address indexed newFeeModel);
     event FeeRecipientUpdated(address indexed previousFeeRecipient, address indexed newFeeRecipient);
     event MinWithdrawDelayUpdated(uint64 previousDelay, uint64 newDelay);
     event UserLockOptionConfigured(address indexed user, uint8 lockOption, uint64 startTimestamp);
     event YieldFeeCharged(address indexed user, address indexed feeRecipient, euint64 feeAmount, uint16 feeBps);
-    event StrategyDeployed(uint64 assets, uint256 sharesOut);
-    event StrategyRedeemed(uint256 sharesIn, uint256 assetsOut);
+    event StrategyDeployed(address indexed adapter, uint64 assets, uint256 sharesOut);
+    event StrategyRedeemed(address indexed adapter, uint256 sharesIn, uint256 assetsOut);
     event EmergencyTokenRecovered(address indexed token, address indexed to, uint256 amount);
 
     error InvalidAsset();
@@ -73,6 +77,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     error AssetRecoveryDisabled();
     error InvalidRecoveryAddress();
     error InvalidStrategyAdapter();
+    error StrategyAdapterNotApproved();
     error StrategyNotConfigured();
     error InvalidFeeModel();
     error InvalidFeeRecipient();
@@ -122,6 +127,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         _confidentialShares[beneficiary] = newUserShares;
         _totalConfidentialShares = newTotalShares;
         _withdrawUnlockAtByUser[beneficiary] = uint64(block.timestamp) + minWithdrawDelay;
+        _hasActivePosition[beneficiary] = true;
 
         FHE.allowThis(newUserShares);
         FHE.allow(newUserShares, beneficiary);
@@ -143,45 +149,44 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         return accepted;
     }
 
-    function withdrawConfidential(
-        InEuint64 calldata encryptedShares,
-        address recipient
-    ) external nonReentrant whenNotPaused returns (euint64 transferred) {
+    function withdrawConfidential(address recipient) external nonReentrant whenNotPaused returns (euint64 transferred) {
         if (recipient == address(0)) revert InvalidRecipient();
 
         uint64 unlockAt = _withdrawUnlockAtByUser[msg.sender];
         if (unlockAt > 0 && block.timestamp < unlockAt) revert WithdrawLocked(unlockAt);
+        if (strategyShares != 0) revert StrategyPositionOpen();
+        if (!_hasActivePosition[msg.sender]) revert InvalidAmount();
 
-        euint64 requested = FHE.asEuint64(encryptedShares);
         euint64 userShares = _confidentialShares[msg.sender];
-        ebool userHasEnough = FHE.gte(userShares, requested);
-        euint64 cappedRequest = FHE.select(userHasEnough, requested, userShares);
         euint64 zero = FHE.asEuint64(0);
-        euint64 payoutAmount = cappedRequest;
+        euint64 payoutAmount;
         euint64 feeAmount = zero;
         uint16 feeBps = 0;
+        euint64 totalShares = _totalConfidentialShares;
+        euint64 vaultAssets = ITezcatliWrappedConfidentialAsset(asset).confidentialBalanceOf(address(this));
+        euint64 grossAmount = FHE.div(FHE.mul(userShares, vaultAssets), totalShares);
+        payoutAmount = grossAmount;
 
         if (_hasLockOption[msg.sender] && feeModel != address(0)) {
-            if (strategyShares != 0) revert StrategyPositionOpen();
-
-            euint64 totalShares = _totalConfidentialShares;
-            euint64 vaultAssets = ITezcatliWrappedConfidentialAsset(asset).confidentialBalanceOf(address(this));
-            euint64 grossAmount = FHE.div(FHE.mul(cappedRequest, vaultAssets), totalShares);
-
-            ebool hasYield = FHE.gte(grossAmount, cappedRequest);
-            euint64 yieldAmount = FHE.select(hasYield, FHE.sub(grossAmount, cappedRequest), zero);
-
             feeBps = ITezcatliFeeModel(feeModel).currentFeeBps(
                 _lockOptionByUser[msg.sender],
                 _lockStartByUser[msg.sender],
                 uint64(block.timestamp)
             );
 
-            euint64 feeRate = FHE.asEuint64(uint64(feeBps));
-            euint64 bpsDenominator = FHE.asEuint64(10_000);
-            feeAmount = FHE.div(FHE.mul(yieldAmount, feeRate), bpsDenominator);
+            feeAmount = _computeYieldFeeCeil(grossAmount, userShares, feeBps);
             payoutAmount = FHE.sub(grossAmount, feeAmount);
         }
+
+        euint64 newUserShares = zero;
+        euint64 newTotalShares;
+        (, newTotalShares) = FHESafeMath.tryDecrease(totalShares, userShares);
+        _confidentialShares[msg.sender] = newUserShares;
+        _totalConfidentialShares = newTotalShares;
+        _hasActivePosition[msg.sender] = false;
+        FHE.allowThis(newUserShares);
+        FHE.allow(newUserShares, msg.sender);
+        FHE.allowThis(newTotalShares);
 
         FHE.allowThis(payoutAmount);
         FHE.allow(payoutAmount, msg.sender);
@@ -196,17 +201,6 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
             euint64 protocolFee = ITezcatliConfidentialAsset(asset).confidentialTransfer(feeRecipient, feeAmount);
             emit YieldFeeCharged(msg.sender, feeRecipient, protocolFee, feeBps);
         }
-
-        euint64 newUserShares;
-        euint64 newTotalShares;
-        (, newUserShares) = FHESafeMath.tryDecrease(userShares, cappedRequest);
-        (, newTotalShares) = FHESafeMath.tryDecrease(_totalConfidentialShares, cappedRequest);
-
-        _confidentialShares[msg.sender] = newUserShares;
-        _totalConfidentialShares = newTotalShares;
-        FHE.allowThis(newUserShares);
-        FHE.allow(newUserShares, msg.sender);
-        FHE.allowThis(newTotalShares);
         FHE.allow(transferred, msg.sender);
         emit WithdrawalExecuted(msg.sender, recipient, transferred);
     }
@@ -219,16 +213,28 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
 
     function setStrategyAdapter(address newStrategyAdapter) external onlyOwner {
         if (newStrategyAdapter != address(0)) {
-            ITezcatliStrategyAdapter adapter = ITezcatliStrategyAdapter(newStrategyAdapter);
-            if (adapter.vault() != address(this)) revert InvalidStrategyAdapter();
-
-            address expectedSettlementAsset = ITezcatliWrappedConfidentialAsset(asset).underlyingToken();
-            if (adapter.settlementAsset() != expectedSettlementAsset) revert InvalidStrategyAdapter();
+            _validateStrategyAdapter(newStrategyAdapter);
+            if (!approvedStrategyAdapters[newStrategyAdapter]) {
+                approvedStrategyAdapters[newStrategyAdapter] = true;
+                emit StrategyAdapterApprovalUpdated(newStrategyAdapter, true);
+            }
         }
 
         address previousAdapter = strategyAdapter;
         strategyAdapter = newStrategyAdapter;
         emit StrategyAdapterUpdated(previousAdapter, newStrategyAdapter);
+    }
+
+    function setStrategyAdapterApproval(address adapter, bool approved) external onlyOwner {
+        if (adapter == address(0)) revert InvalidStrategyAdapter();
+        if (approved) {
+            _validateStrategyAdapter(adapter);
+        } else if (strategySharesByAdapter[adapter] != 0) {
+            revert StrategyPositionOpen();
+        }
+
+        approvedStrategyAdapters[adapter] = approved;
+        emit StrategyAdapterApprovalUpdated(adapter, approved);
     }
 
     function setFeeModel(address newFeeModel) external onlyOwner {
@@ -256,32 +262,54 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     }
 
     function coordinatorDeployToStrategy(
+        address adapter,
         uint64 assets,
         uint256 minSharesOut
     ) external onlyCoordinator nonReentrant whenNotPaused returns (uint256 sharesOut) {
-        if (strategyAdapter == address(0)) revert StrategyNotConfigured();
+        sharesOut = _coordinatorDeployToStrategy(adapter, assets, minSharesOut);
+    }
+
+    function _coordinatorDeployToStrategy(
+        address adapter,
+        uint64 assets,
+        uint256 minSharesOut
+    ) internal returns (uint256 sharesOut) {
+        if (adapter == address(0)) revert StrategyNotConfigured();
+        if (!approvedStrategyAdapters[adapter]) revert StrategyAdapterNotApproved();
         if (assets == 0) revert InvalidAmount();
 
         ITezcatliWrappedConfidentialAsset wrappedAsset = ITezcatliWrappedConfidentialAsset(asset);
         wrappedAsset.unshield(assets);
 
         IERC20 settlementAsset = IERC20(wrappedAsset.underlyingToken());
-        settlementAsset.forceApprove(strategyAdapter, uint256(assets));
+        settlementAsset.forceApprove(adapter, uint256(assets));
 
-        sharesOut = ITezcatliStrategyAdapter(strategyAdapter).deploy(uint256(assets), minSharesOut);
+        sharesOut = ITezcatliStrategyAdapter(adapter).deploy(uint256(assets), minSharesOut);
         strategyShares += sharesOut;
+        strategySharesByAdapter[adapter] += sharesOut;
 
-        emit StrategyDeployed(assets, sharesOut);
+        emit StrategyDeployed(adapter, assets, sharesOut);
     }
 
     function coordinatorRedeemFromStrategy(
+        address adapter,
         uint256 shares,
         uint64 minAssetsOut
     ) external onlyCoordinator nonReentrant whenNotPaused returns (uint256 assetsOut) {
-        if (strategyAdapter == address(0)) revert StrategyNotConfigured();
-        if (shares == 0 || shares > strategyShares) revert InvalidAmount();
+        assetsOut = _coordinatorRedeemFromStrategy(adapter, shares, minAssetsOut);
+    }
 
-        assetsOut = ITezcatliStrategyAdapter(strategyAdapter).redeem(shares, uint256(minAssetsOut), address(this));
+    function _coordinatorRedeemFromStrategy(
+        address adapter,
+        uint256 shares,
+        uint64 minAssetsOut
+    ) internal returns (uint256 assetsOut) {
+        if (adapter == address(0)) revert StrategyNotConfigured();
+        if (!approvedStrategyAdapters[adapter]) revert StrategyAdapterNotApproved();
+        if (shares == 0 || shares > strategyShares) revert InvalidAmount();
+        if (shares > strategySharesByAdapter[adapter]) revert InvalidAmount();
+
+        assetsOut = ITezcatliStrategyAdapter(adapter).redeem(shares, uint256(minAssetsOut), address(this));
         if (assetsOut > type(uint64).max) revert InvalidAmount();
 
         ITezcatliWrappedConfidentialAsset wrappedAsset = ITezcatliWrappedConfidentialAsset(asset);
@@ -290,7 +318,13 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         wrappedAsset.shieldTo(address(this), uint64(assetsOut));
 
         strategyShares -= shares;
-        emit StrategyRedeemed(shares, assetsOut);
+        strategySharesByAdapter[adapter] -= shares;
+        emit StrategyRedeemed(adapter, shares, assetsOut);
+    }
+
+    function strategyManagedAssetsOf(address adapter) external view returns (uint256) {
+        if (!approvedStrategyAdapters[adapter] && strategySharesByAdapter[adapter] == 0) return 0;
+        return ITezcatliStrategyAdapter(adapter).totalManagedAssets();
     }
 
     function confidentialSharesOf(address account) external view returns (euint64) {
@@ -336,5 +370,28 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
 
         IERC20(token).safeTransfer(to, amount);
         emit EmergencyTokenRecovered(token, to, amount);
+    }
+
+    function _validateStrategyAdapter(address adapterAddress) internal view {
+        ITezcatliStrategyAdapter adapter = ITezcatliStrategyAdapter(adapterAddress);
+        if (adapter.vault() != address(this)) revert InvalidStrategyAdapter();
+
+        address expectedSettlementAsset = ITezcatliWrappedConfidentialAsset(asset).underlyingToken();
+        if (adapter.settlementAsset() != expectedSettlementAsset) revert InvalidStrategyAdapter();
+    }
+
+    function _computeYieldFeeCeil(euint64 grossAmount, euint64 principal, uint16 feeBps) internal returns (euint64 feeAmount) {
+        euint64 zero = FHE.asEuint64(0);
+        ebool hasYield = FHE.gte(grossAmount, principal);
+        euint64 yieldAmount = FHE.select(hasYield, FHE.sub(grossAmount, principal), zero);
+
+        euint64 feeRate = FHE.asEuint64(uint64(feeBps));
+        euint64 bpsDenominator = FHE.asEuint64(10_000);
+        euint64 feeProduct = FHE.mul(yieldAmount, feeRate);
+        euint64 feeFloor = FHE.div(feeProduct, bpsDenominator);
+        euint64 feeReconstructed = FHE.mul(feeFloor, bpsDenominator);
+        ebool hasRemainder = FHE.gt(feeProduct, feeReconstructed);
+        euint64 feeCeilDelta = FHE.select(hasRemainder, FHE.asEuint64(1), zero);
+        feeAmount = FHE.add(feeFloor, feeCeilDelta);
     }
 }

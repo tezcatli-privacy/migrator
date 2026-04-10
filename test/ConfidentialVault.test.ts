@@ -40,8 +40,6 @@ describe("Tezcatli confidential vault", function () {
     await (await wrappedToken.connect(user).shield(30_000_000n)).wait();
 
     const userClient = await hre.cofhe.createClientWithBatteries(user);
-    const recipientClient = await hre.cofhe.createClientWithBatteries(recipient);
-
     return {
       deployer,
       user,
@@ -52,7 +50,6 @@ describe("Tezcatli confidential vault", function () {
       vault,
       feeModel,
       userClient,
-      recipientClient,
     };
   }
 
@@ -83,7 +80,7 @@ describe("Tezcatli confidential vault", function () {
   });
 
   it("supports confidential withdrawals and preserves user accounting", async function () {
-    const { user, recipient, wrappedToken, vault, userClient, recipientClient } = await loadFixture(deployFixture);
+    const { user, recipient, wrappedToken, vault, userClient } = await loadFixture(deployFixture);
 
     const depositAmount = 16_000_000n;
     const [encryptedDeposit] = await userClient
@@ -99,22 +96,19 @@ describe("Tezcatli confidential vault", function () {
         hre.ethers.AbiCoder.defaultAbiCoder().encode(["address"], [user.address]),
       );
 
-    const withdrawAmount = 5_000_000n;
-    const [encryptedWithdraw] = await userClient
-      .encryptInputs([Encryptable.uint64(withdrawAmount)])
-      .setAccount(user.address)
-      .execute();
-
     await time.increase(7 * 24 * 60 * 60);
-    await vault.connect(user).withdrawConfidential(encryptedWithdraw, recipient.address);
+    await vault.connect(user).withdrawConfidential(recipient.address);
 
     const recipientHandle = await wrappedToken.confidentialBalanceOf(recipient.address);
     const recipientBalance = await hre.cofhe.mocks.getPlaintext(recipientHandle);
-    expect(recipientBalance).to.equal(withdrawAmount);
+    expect(recipientBalance).to.equal(depositAmount);
 
     const sharesHandle = await vault.confidentialSharesOf(user.address);
     const remainingShares = await hre.cofhe.mocks.getPlaintext(sharesHandle);
-    expect(remainingShares).to.equal(depositAmount - withdrawAmount);
+    expect(remainingShares).to.equal(0n);
+
+    await expect(vault.connect(user).withdrawConfidential(recipient.address))
+      .to.be.revertedWithCustomError(vault, "InvalidAmount");
   });
 
   it("enforces a 7-day minimum withdrawal delay", async function () {
@@ -134,16 +128,11 @@ describe("Tezcatli confidential vault", function () {
         hre.ethers.AbiCoder.defaultAbiCoder().encode(["address"], [user.address]),
       );
 
-    const [encryptedWithdraw] = await userClient
-      .encryptInputs([Encryptable.uint64(1_000_000n)])
-      .setAccount(user.address)
-      .execute();
-
-    await expect(vault.connect(user).withdrawConfidential(encryptedWithdraw, user.address))
+    await expect(vault.connect(user).withdrawConfidential(user.address))
       .to.be.revertedWithCustomError(vault, "WithdrawLocked");
 
     await time.increase(7 * 24 * 60 * 60);
-    await expect(vault.connect(user).withdrawConfidential(encryptedWithdraw, user.address))
+    await expect(vault.connect(user).withdrawConfidential(user.address))
       .to.not.be.reverted;
   });
 
@@ -167,12 +156,7 @@ describe("Tezcatli confidential vault", function () {
         ),
     ).to.be.revertedWithCustomError(vault, "EnforcedPause");
 
-    const [encryptedWithdraw] = await userClient
-      .encryptInputs([Encryptable.uint64(1_000_000n)])
-      .setAccount(user.address)
-      .execute();
-
-    await expect(vault.connect(user).withdrawConfidential(encryptedWithdraw, user.address))
+    await expect(vault.connect(user).withdrawConfidential(user.address))
       .to.be.revertedWithCustomError(vault, "EnforcedPause");
   });
 
@@ -244,13 +228,8 @@ describe("Tezcatli confidential vault", function () {
     await (await usdc.connect(deployer).approve(await wrappedToken.getAddress(), 2_000_000n)).wait();
     await (await wrappedToken.connect(deployer).shieldTo(await vault.getAddress(), 2_000_000n)).wait();
 
-    const [encryptedWithdraw] = await userClient
-      .encryptInputs([Encryptable.uint64(depositAmount)])
-      .setAccount(user.address)
-      .execute();
-
     await time.increase(7 * 24 * 60 * 60);
-    await vault.connect(user).withdrawConfidential(encryptedWithdraw, recipient.address);
+    await vault.connect(user).withdrawConfidential(recipient.address);
 
     const recipientHandle = await wrappedToken.confidentialBalanceOf(recipient.address);
     const recipientBalance = await hre.cofhe.mocks.getPlaintext(recipientHandle);

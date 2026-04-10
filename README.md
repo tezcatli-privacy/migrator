@@ -68,6 +68,7 @@ The confidential vault + strategy orchestration pass is now included:
 - withdrawals are requested with encrypted inputs and paid out as confidential token transfers
 - vault includes `pause/unpause` and emergency recovery for non-asset ERC-20 tokens
 - `TezcatliVaultCoordinator` + `TezcatliStrategyAdapterERC4626` route funds into ERC-4626 strategies and back
+- strategy adapters can be configured per vault with risk buckets (`low`, `medium`, `high`) and allocation caps in bps
 - vault fee model supports 4 lock options (3/6/12/18 months) with a time-decay fee curve from 5.00% to floor fee
 - withdrawals are gated by a minimum 7-day delay from latest deposit activity (MVP liquidity constraint)
 - fee is charged only on realized yield in the opt-in lock flow; principal is not charged
@@ -77,6 +78,7 @@ Current vault limitation:
 - lock configuration is user-level (single active lock option and start timestamp per account), not tranche-level per deposit
 - minimum withdrawal delay is currently user-level and resets on each new deposit
 - when lock-fee mode is used, strategy positions should be redeemed before user withdrawals so payout liquidity is settled on-vault
+- allocation caps are enforced against the currently managed strategy set (not full vault TVL including idle confidential liquidity)
 
 ## CoFHE Encrypted Input Account
 
@@ -181,6 +183,7 @@ The test suite currently covers:
 - confidential vault withdrawals with encrypted inputs
 - vault pause controls and factory one-vault-per-asset enforcement
 - strategy routing through `TezcatliVaultCoordinator` and `TezcatliStrategyAdapterERC4626`
+- multi-strategy allocation cap enforcement by risk profile
 - lock-option fee decay and yield-only fee charging behavior
 - end-to-end paymaster-sponsored confidential transfer after migration to a 4337 account
 - recipient-side decryption with `decryptForView(...)`
@@ -190,7 +193,7 @@ The test suite currently covers:
 
 ## Notes
 
-- This repo focuses on step 1 only. It now includes a local 4337 test surface (`TezcatliEntryPointMock`, `Tezcatli4337Account`, `TezcatliPaymaster`) to validate sponsorship and policy checks.
+- This repo now covers step 1 and a substantial step-2 slice. It includes a local 4337 test surface (`TezcatliEntryPointMock`, `Tezcatli4337Account`, `TezcatliPaymaster`) plus confidential vault strategy orchestration and allocation controls.
 - `TezcatliPaymaster` is intentionally strict for safety and simplicity:
 - it only sponsors `execute(address,uint256,bytes)` calls
 - it requires an approved target list
