@@ -49,6 +49,30 @@ task("deploy-migrator-stack", "Deploy the Tezcatli wallet migrator MVP").setActi
     const smartAccountFactory = await SmartAccountFactory.deploy();
     await smartAccountFactory.waitForDeployment();
 
+    const EntryPointMock = await ethers.getContractFactory("TezcatliEntryPointMock");
+    const entryPointMock = await EntryPointMock.deploy();
+    await entryPointMock.waitForDeployment();
+
+    const Smart4337Factory = await ethers.getContractFactory("Tezcatli4337AccountFactory");
+    const smart4337Factory = await Smart4337Factory.deploy(await entryPointMock.getAddress());
+    await smart4337Factory.waitForDeployment();
+
+    const Paymaster = await ethers.getContractFactory("TezcatliPaymaster");
+    const paymaster = await Paymaster.deploy(
+      await entryPointMock.getAddress(),
+      await mockUSDC.getAddress(),
+      deployer.address,
+      5_000_000n,
+      await smart4337Factory.getAddress(),
+      deployer.address,
+    );
+    await paymaster.waitForDeployment();
+
+    await (await paymaster.setApprovedTarget(await migrator.getAddress(), true)).wait();
+    await (await paymaster.setApprovedTarget(await wrappedToken.getAddress(), true)).wait();
+    await (await paymaster.setApprovedTarget(await dustSwap.getAddress(), true)).wait();
+    await (await paymaster.setApprovedTarget(await mockUSDC.getAddress(), true)).wait();
+
     await (await mockUSDC.mint(deployer.address, 2_000_000_000n)).wait();
     await (await mockUSDC.approve(await dustSwap.getAddress(), 1_000_000_000n)).wait();
     await (await dustSwap.fundSettlement(1_000_000_000n)).wait();
@@ -68,6 +92,9 @@ task("deploy-migrator-stack", "Deploy the Tezcatli wallet migrator MVP").setActi
       TezcatliMigrator: await migrator.getAddress(),
       TezcatliDustSwap: await dustSwap.getAddress(),
       TezcatliSmartAccountFactory: await smartAccountFactory.getAddress(),
+      TezcatliEntryPointMock: await entryPointMock.getAddress(),
+      Tezcatli4337AccountFactory: await smart4337Factory.getAddress(),
+      TezcatliPaymaster: await paymaster.getAddress(),
     };
 
     for (const [name, address] of Object.entries(deployments)) {

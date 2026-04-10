@@ -10,6 +10,7 @@
     "task:deploy": "hardhat deploy-migrator-stack",
     "task:dust-swap-demo": "hardhat dust-swap-demo",
     "task:migrate-demo": "hardhat migrate-demo",
+    "task:paymaster-demo": "hardhat paymaster-demo",
     "localcofhe:start": "hardhat localcofhe:start --clean true",
     "localcofhe:test": "hardhat test --network localcofhe",
     "localcofhe:test:gas": "REPORT_GAS=true hardhat test --network localcofhe",

@@ -13,6 +13,10 @@ The MVP keeps the contract surface intentionally small:
 - `TezcatliDustSwap.sol`: converts supported dust tokens into settlement USDC before shielding
 - `TezcatliSmartAccount.sol`: minimal programmable destination account with `execute`, `executeBatch`, and ERC-1271
 - `TezcatliSmartAccountFactory.sol`: deterministic CREATE2 factory for smart-account deployment
+- `TezcatliEntryPointMock.sol`: minimal local EntryPoint for ERC-4337-style tests
+- `Tezcatli4337Account.sol`: simple account-abstraction smart account with `validateUserOp` and ERC-1271
+- `Tezcatli4337AccountFactory.sol`: deterministic factory for the 4337 account
+- `TezcatliPaymaster.sol`: target-restricted ERC-20 fee paymaster for sponsored user operations
 
 ## Migration Model
 
@@ -117,6 +121,19 @@ The dust-swap demo task:
 - shields the settlement amount into a confidential recipient balance
 - decrypts the recipient balance to verify the flow
 
+### Run the paymaster demo task
+
+```bash
+pnpm task:paymaster-demo
+```
+
+The paymaster demo task:
+
+- migrates funds from a stealth signer into a 4337 smart account
+- prepares a sponsored user operation through `TezcatliPaymaster`
+- executes a confidential transfer from the smart account via `TezcatliEntryPointMock`
+- verifies recipient confidential balance and fee collection in USDC
+
 ### Local CoFHE network
 
 ```bash
@@ -136,6 +153,9 @@ The test suite currently covers:
 - batch sweep from multiple stealth addresses in one call
 - smart-account destination migration
 - smart-account outbound confidential transfer via `execute(...)`
+- 4337 paymaster sponsorship for approved targets
+- paymaster rejections for unapproved targets and unapproved factories
+- end-to-end paymaster-sponsored confidential transfer after migration to a 4337 account
 - recipient-side decryption with `decryptForView(...)`
 - post-migration confidential transfers
 - unshielding confidential funds back into the public ERC-20
@@ -143,7 +163,11 @@ The test suite currently covers:
 
 ## Notes
 
-- This repo focuses on step 1 only. It includes a minimal smart account, but not full ERC-4337 account abstraction, EntryPoint integration, or paymasters yet.
+- This repo focuses on step 1 only. It now includes a local 4337 test surface (`TezcatliEntryPointMock`, `Tezcatli4337Account`, `TezcatliPaymaster`) to validate sponsorship and policy checks.
+- `TezcatliPaymaster` is intentionally strict for safety and simplicity:
+- it only sponsors `execute(address,uint256,bytes)` calls
+- it requires an approved target list
+- it enforces factory allowlisting for `initCode` deployments
 - Dust swaps are deliberately modeled as a controlled onchain converter for MVP purposes. Replacing that with a DEX/aggregator route is a later hardening step.
 - NFTs are intentionally out of scope for this first pass.
 - The wrapped token uses `fhenix-confidential-contracts` to keep the confidentiality layer simple and close to ecosystem conventions.

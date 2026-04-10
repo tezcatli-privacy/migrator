@@ -114,6 +114,26 @@ describe("Tezcatli wallet migrator", function () {
     const smartAccountFactory = await SmartAccountFactory.deploy();
     await smartAccountFactory.waitForDeployment();
 
+    const EntryPoint = await hre.ethers.getContractFactory("TezcatliEntryPointMock");
+    const entryPoint = await EntryPoint.deploy();
+    await entryPoint.waitForDeployment();
+
+    const Smart4337Factory = await hre.ethers.getContractFactory("Tezcatli4337AccountFactory");
+    const smart4337Factory = await Smart4337Factory.deploy(await entryPoint.getAddress());
+    await smart4337Factory.waitForDeployment();
+
+    const Paymaster = await hre.ethers.getContractFactory("TezcatliPaymaster");
+    const paymaster = await Paymaster.deploy(
+      await entryPoint.getAddress(),
+      await usdc.getAddress(),
+      deployer.address,
+      5_000_000n,
+      await smart4337Factory.getAddress(),
+      deployer.address,
+    );
+    await paymaster.waitForDeployment();
+    await (await paymaster.setApprovedTarget(await wrappedToken.getAddress(), true)).wait();
+
     await (await usdc.mint(deployer.address, 2_500_000_000n)).wait();
     await (await usdc.mint(stealthSigner.address, 500_000_000n)).wait();
     await (await usdc.mint(secondStealthSigner.address, 500_000_000n)).wait();
@@ -147,6 +167,9 @@ describe("Tezcatli wallet migrator", function () {
       migrator,
       dustSwap,
       smartAccountFactory,
+      entryPoint,
+      smart4337Factory,
+      paymaster,
       deployerClient,
       stealthClient,
       recipientClient,
@@ -455,6 +478,120 @@ describe("Tezcatli wallet migrator", function () {
     const smartAccountHandle = await wrappedToken.confidentialBalanceOf(smartAccountAddress);
     const smartAccountBalance = await hre.cofhe.mocks.getPlaintext(smartAccountHandle);
     expect(smartAccountBalance).to.equal(18_000_000n);
+  });
+
+  it("supports paymaster-sponsored 4337 transfers after migration", async function () {
+    const {
+      deployer,
+      stealthSigner,
+      recipient,
+      accountOwner,
+      usdc,
+      wrappedToken,
+      migrator,
+      entryPoint,
+      smart4337Factory,
+      paymaster,
+      recipientClient,
+    } = await loadFixture(deployFixture);
+
+    const salt = 17n;
+    const smart4337Address = await smart4337Factory.predictAccountAddress(accountOwner.address, salt);
+    await (await smart4337Factory.createAccount(accountOwner.address, salt)).wait();
+    const smart4337Account = await hre.ethers.getContractAt("Tezcatli4337Account", smart4337Address);
+
+    const migratedAmount = 27_000_000n;
+    await usdc.connect(stealthSigner).approve(await migrator.getAddress(), migratedAmount);
+
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const nonce = await migrator.nonces(stealthSigner.address);
+    const digest = await buildSweepDigest(
+      await migrator.getAddress(),
+      BigInt((await hre.ethers.provider.getNetwork()).chainId),
+      stealthSigner.address,
+      smart4337Address,
+      await usdc.getAddress(),
+      await wrappedToken.getAddress(),
+      migratedAmount,
+      nonce,
+      deadline,
+    );
+    const signature = await stealthSigner.signMessage(hre.ethers.getBytes(digest));
+
+    await migrator.sweepAndMigrate(
+      {
+        stealthAddress: stealthSigner.address,
+        recipient: smart4337Address,
+        token: await usdc.getAddress(),
+        confidentialToken: await wrappedToken.getAddress(),
+        amount: migratedAmount,
+        nonce,
+        deadline,
+      },
+      signature,
+    );
+
+    await (await usdc.mint(smart4337Address, 10_000_000n)).wait();
+    const approveCalldata = usdc.interface.encodeFunctionData(
+      "approve",
+      [await paymaster.getAddress(), hre.ethers.MaxUint256],
+    );
+    await smart4337Account.connect(accountOwner).execute(
+      await usdc.getAddress(),
+      0,
+      approveCalldata,
+    );
+
+    const ownerClient = await hre.cofhe.createClientWithBatteries(accountOwner);
+    const sponsoredTransferAmount = 9_000_000n;
+    const [encryptedTransfer] = await ownerClient
+      .encryptInputs([Encryptable.uint64(sponsoredTransferAmount)])
+      .setAccount(smart4337Address)
+      .execute();
+
+    const transferCalldata = wrappedToken.interface.encodeFunctionData(
+      "confidentialTransfer(address,(uint256,uint8,uint8,bytes))",
+      [recipient.address, encryptedTransfer],
+    );
+    const userOpCallData = smart4337Account.interface.encodeFunctionData(
+      "execute",
+      [await wrappedToken.getAddress(), 0, transferCalldata],
+    );
+
+    const userOp = {
+      sender: smart4337Address,
+      nonce: 0n,
+      initCode: "0x",
+      callData: userOpCallData,
+      accountGasLimits: hre.ethers.ZeroHash,
+      preVerificationGas: 0n,
+      gasFees: hre.ethers.ZeroHash,
+      paymasterAndData: hre.ethers.solidityPacked(
+        ["address", "uint256"],
+        [await paymaster.getAddress(), sponsoredTransferAmount],
+      ),
+      signature: "0x",
+    };
+
+    const userOpHash = await entryPoint.getUserOpHash(userOp);
+    userOp.signature = await accountOwner.signMessage(hre.ethers.getBytes(userOpHash));
+
+    const treasuryBefore = await usdc.balanceOf(deployer.address);
+    await entryPoint.handleOps([userOp], deployer.address);
+    const treasuryAfter = await usdc.balanceOf(deployer.address);
+
+    const recipientHandle = await wrappedToken.confidentialBalanceOf(recipient.address);
+    const recipientBalance = await recipientClient
+      .decryptForView(recipientHandle, FheTypes.Uint64)
+      .execute();
+    expect(recipientBalance).to.equal(sponsoredTransferAmount);
+
+    const smart4337Handle = await wrappedToken.confidentialBalanceOf(smart4337Address);
+    const smart4337Balance = await hre.cofhe.mocks.getPlaintext(smart4337Handle);
+    expect(smart4337Balance).to.equal(migratedAmount - sponsoredTransferAmount);
+
+    const expectedFee = (sponsoredTransferAmount * 100n) / 10_000n;
+    expect(treasuryAfter - treasuryBefore).to.equal(expectedFee);
   });
 
   it("supports batching multiple stealth-address migrations in one call", async function () {
