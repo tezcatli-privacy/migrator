@@ -74,6 +74,20 @@ task("deploy-migrator-stack", "Deploy the Tezcatli wallet migrator MVP").setActi
 
     await (await vaultFactory.createVault(await wrappedToken.getAddress(), deployer.address)).wait();
     const confidentialVaultAddress = await vaultFactory.vaultByAsset(await wrappedToken.getAddress());
+    const confidentialVault = await ethers.getContractAt("TezcatliConfidentialVault", confidentialVaultAddress);
+
+    const VaultCoordinator = await ethers.getContractFactory("TezcatliVaultCoordinator");
+    const vaultCoordinator = await VaultCoordinator.deploy(deployer.address);
+    await vaultCoordinator.waitForDeployment();
+
+    const VaultFeeModel = await ethers.getContractFactory("TezcatliVaultFeeModel");
+    const vaultFeeModel = await VaultFeeModel.deploy();
+    await vaultFeeModel.waitForDeployment();
+
+    await (await confidentialVault.setCoordinator(await vaultCoordinator.getAddress())).wait();
+    await (await vaultCoordinator.setApprovedVault(confidentialVaultAddress, true)).wait();
+    await (await confidentialVault.setFeeModel(await vaultFeeModel.getAddress())).wait();
+    await (await confidentialVault.setFeeRecipient(deployer.address)).wait();
 
     await (await paymaster.setApprovedTarget(await migrator.getAddress(), true)).wait();
     await (await paymaster.setApprovedTarget(await wrappedToken.getAddress(), true)).wait();
@@ -105,6 +119,8 @@ task("deploy-migrator-stack", "Deploy the Tezcatli wallet migrator MVP").setActi
       TezcatliPaymaster: await paymaster.getAddress(),
       TezcatliConfidentialVaultFactory: await vaultFactory.getAddress(),
       TezcatliConfidentialVault: confidentialVaultAddress,
+      TezcatliVaultCoordinator: await vaultCoordinator.getAddress(),
+      TezcatliVaultFeeModel: await vaultFeeModel.getAddress(),
     };
 
     for (const [name, address] of Object.entries(deployments)) {

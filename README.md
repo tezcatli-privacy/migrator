@@ -19,6 +19,9 @@ The MVP keeps the contract surface intentionally small:
 - `TezcatliPaymaster.sol`: target-restricted ERC-20 fee paymaster for sponsored user operations
 - `TezcatliConfidentialVault.sol`: confidential deposit/withdraw vault using callback-based FHERC20 deposits
 - `TezcatliConfidentialVaultFactory.sol`: one-vault-per-asset factory for confidential vault deployment
+- `TezcatliVaultCoordinator.sol`: operator-controlled coordinator for strategy deploy/redeem actions
+- `TezcatliStrategyAdapterERC4626.sol`: ERC-4626 adapter that isolates strategy interactions from vault logic
+- `TezcatliVaultFeeModel.sol`: bonding-curve fee model (5.00% -> 0.50%) across 3/6/12/18 month options
 
 ## Migration Model
 
@@ -58,16 +61,22 @@ This first pass is intentionally conservative:
 
 That last point matters. A secure migrator should not accept an encrypted amount it cannot verify against the public sweep amount. Full amount privacy during migration needs a batching or aggregation layer on top of the stealth intake, which is a later step.
 
-The first confidential vault pass is now included:
+The confidential vault + strategy orchestration pass is now included:
 
 - users deposit with `confidentialTransferAndCall(...)` into `TezcatliConfidentialVault`
 - vault shares are tracked as encrypted balances per account
 - withdrawals are requested with encrypted inputs and paid out as confidential token transfers
 - vault includes `pause/unpause` and emergency recovery for non-asset ERC-20 tokens
+- `TezcatliVaultCoordinator` + `TezcatliStrategyAdapterERC4626` route funds into ERC-4626 strategies and back
+- vault fee model supports 4 lock options (3/6/12/18 months) with a time-decay fee curve from 5.00% to floor fee
+- withdrawals are gated by a minimum 7-day delay from latest deposit activity (MVP liquidity constraint)
+- fee is charged only on realized yield in the opt-in lock flow; principal is not charged
 
 Current vault limitation:
 
-- this version focuses on confidential accounting and custody; strategy adapters (Aave/Compound/Lido settlement) are not wired yet
+- lock configuration is user-level (single active lock option and start timestamp per account), not tranche-level per deposit
+- minimum withdrawal delay is currently user-level and resets on each new deposit
+- when lock-fee mode is used, strategy positions should be redeemed before user withdrawals so payout liquidity is settled on-vault
 
 ## CoFHE Encrypted Input Account
 
@@ -171,6 +180,8 @@ The test suite currently covers:
 - confidential vault deposits through token callback
 - confidential vault withdrawals with encrypted inputs
 - vault pause controls and factory one-vault-per-asset enforcement
+- strategy routing through `TezcatliVaultCoordinator` and `TezcatliStrategyAdapterERC4626`
+- lock-option fee decay and yield-only fee charging behavior
 - end-to-end paymaster-sponsored confidential transfer after migration to a 4337 account
 - recipient-side decryption with `decryptForView(...)`
 - post-migration confidential transfers

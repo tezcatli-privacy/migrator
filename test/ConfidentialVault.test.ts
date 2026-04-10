@@ -1,4 +1,4 @@
-import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import hre from "hardhat";
 import { Encryptable, FheTypes } from "@cofhe/sdk";
 import { expect } from "chai";
@@ -28,6 +28,13 @@ describe("Tezcatli confidential vault", function () {
     const vault = await Vault.deploy(await wrappedToken.getAddress(), deployer.address);
     await vault.waitForDeployment();
 
+    const FeeModel = await hre.ethers.getContractFactory("TezcatliVaultFeeModel");
+    const feeModel = await FeeModel.deploy();
+    await feeModel.waitForDeployment();
+
+    await (await vault.setFeeModel(await feeModel.getAddress())).wait();
+    await (await vault.setFeeRecipient(deployer.address)).wait();
+
     await (await usdc.mint(user.address, 100_000_000n)).wait();
     await (await usdc.connect(user).approve(await wrappedToken.getAddress(), 100_000_000n)).wait();
     await (await wrappedToken.connect(user).shield(30_000_000n)).wait();
@@ -43,6 +50,7 @@ describe("Tezcatli confidential vault", function () {
       usdc,
       wrappedToken,
       vault,
+      feeModel,
       userClient,
       recipientClient,
     };
@@ -97,15 +105,46 @@ describe("Tezcatli confidential vault", function () {
       .setAccount(user.address)
       .execute();
 
+    await time.increase(7 * 24 * 60 * 60);
     await vault.connect(user).withdrawConfidential(encryptedWithdraw, recipient.address);
 
     const recipientHandle = await wrappedToken.confidentialBalanceOf(recipient.address);
-    const recipientBalance = await recipientClient.decryptForView(recipientHandle, FheTypes.Uint64).execute();
+    const recipientBalance = await hre.cofhe.mocks.getPlaintext(recipientHandle);
     expect(recipientBalance).to.equal(withdrawAmount);
 
     const sharesHandle = await vault.confidentialSharesOf(user.address);
-    const remainingShares = await userClient.decryptForView(sharesHandle, FheTypes.Uint64).execute();
+    const remainingShares = await hre.cofhe.mocks.getPlaintext(sharesHandle);
     expect(remainingShares).to.equal(depositAmount - withdrawAmount);
+  });
+
+  it("enforces a 7-day minimum withdrawal delay", async function () {
+    const { user, wrappedToken, vault, userClient } = await loadFixture(deployFixture);
+
+    const depositAmount = 6_000_000n;
+    const [encryptedDeposit] = await userClient
+      .encryptInputs([Encryptable.uint64(depositAmount)])
+      .setAccount(user.address)
+      .execute();
+
+    await wrappedToken
+      .connect(user)
+      ["confidentialTransferAndCall(address,(uint256,uint8,uint8,bytes),bytes)"](
+        await vault.getAddress(),
+        encryptedDeposit,
+        hre.ethers.AbiCoder.defaultAbiCoder().encode(["address"], [user.address]),
+      );
+
+    const [encryptedWithdraw] = await userClient
+      .encryptInputs([Encryptable.uint64(1_000_000n)])
+      .setAccount(user.address)
+      .execute();
+
+    await expect(vault.connect(user).withdrawConfidential(encryptedWithdraw, user.address))
+      .to.be.revertedWithCustomError(vault, "WithdrawLocked");
+
+    await time.increase(7 * 24 * 60 * 60);
+    await expect(vault.connect(user).withdrawConfidential(encryptedWithdraw, user.address))
+      .to.not.be.reverted;
   });
 
   it("blocks deposits and withdrawals while paused", async function () {
@@ -135,6 +174,91 @@ describe("Tezcatli confidential vault", function () {
 
     await expect(vault.connect(user).withdrawConfidential(encryptedWithdraw, user.address))
       .to.be.revertedWithCustomError(vault, "EnforcedPause");
+  });
+
+  it("stores lock option and decays fee over time", async function () {
+    const { user, wrappedToken, vault, userClient } = await loadFixture(deployFixture);
+
+    const depositAmount = 8_000_000n;
+    const [encryptedDeposit] = await userClient
+      .encryptInputs([Encryptable.uint64(depositAmount)])
+      .setAccount(user.address)
+      .execute();
+
+    await wrappedToken
+      .connect(user)
+      ["confidentialTransferAndCall(address,(uint256,uint8,uint8,bytes),bytes)"](
+        await vault.getAddress(),
+        encryptedDeposit,
+        hre.ethers.AbiCoder.defaultAbiCoder().encode(["address", "uint8"], [user.address, 3]),
+      );
+
+    expect(await vault.hasLockOption(user.address)).to.equal(true);
+    expect(await vault.lockOptionOf(user.address)).to.equal(3n);
+    expect(await vault.currentWithdrawalFeeBps(user.address)).to.equal(500);
+
+    await time.increase(540 * 24 * 60 * 60);
+    expect(await vault.currentWithdrawalFeeBps(user.address)).to.equal(50);
+  });
+
+  it("applies 0.5% floor fee after full lock period for the 3-month option", async function () {
+    const { user, wrappedToken, vault, userClient } = await loadFixture(deployFixture);
+
+    const depositAmount = 4_000_000n;
+    const [encryptedDeposit] = await userClient
+      .encryptInputs([Encryptable.uint64(depositAmount)])
+      .setAccount(user.address)
+      .execute();
+
+    await wrappedToken
+      .connect(user)
+      ["confidentialTransferAndCall(address,(uint256,uint8,uint8,bytes),bytes)"](
+        await vault.getAddress(),
+        encryptedDeposit,
+        hre.ethers.AbiCoder.defaultAbiCoder().encode(["address", "uint8"], [user.address, 0]),
+      );
+
+    expect(await vault.currentWithdrawalFeeBps(user.address)).to.equal(500);
+    await time.increase(90 * 24 * 60 * 60);
+    expect(await vault.currentWithdrawalFeeBps(user.address)).to.equal(50);
+  });
+
+  it("applies fee to realized yield only when lock option is configured", async function () {
+    const { deployer, user, recipient, usdc, wrappedToken, vault, userClient, recipientClient } = await loadFixture(deployFixture);
+
+    const depositAmount = 20_000_000n;
+    const [encryptedDeposit] = await userClient
+      .encryptInputs([Encryptable.uint64(depositAmount)])
+      .setAccount(user.address)
+      .execute();
+
+    await wrappedToken
+      .connect(user)
+      ["confidentialTransferAndCall(address,(uint256,uint8,uint8,bytes),bytes)"](
+        await vault.getAddress(),
+        encryptedDeposit,
+        hre.ethers.AbiCoder.defaultAbiCoder().encode(["address", "uint8"], [user.address, 0]),
+      );
+
+    await (await usdc.mint(deployer.address, 5_000_000n)).wait();
+    await (await usdc.connect(deployer).approve(await wrappedToken.getAddress(), 2_000_000n)).wait();
+    await (await wrappedToken.connect(deployer).shieldTo(await vault.getAddress(), 2_000_000n)).wait();
+
+    const [encryptedWithdraw] = await userClient
+      .encryptInputs([Encryptable.uint64(depositAmount)])
+      .setAccount(user.address)
+      .execute();
+
+    await time.increase(7 * 24 * 60 * 60);
+    await vault.connect(user).withdrawConfidential(encryptedWithdraw, recipient.address);
+
+    const recipientHandle = await wrappedToken.confidentialBalanceOf(recipient.address);
+    const recipientBalance = await hre.cofhe.mocks.getPlaintext(recipientHandle);
+    expect(recipientBalance).to.equal(21_907_000n);
+
+    const feeRecipientHandle = await wrappedToken.confidentialBalanceOf(deployer.address);
+    const feeRecipientBalance = await hre.cofhe.mocks.getPlaintext(feeRecipientHandle);
+    expect(feeRecipientBalance).to.equal(93_000n);
   });
 
   it("factory creates one vault per asset", async function () {
