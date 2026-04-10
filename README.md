@@ -11,7 +11,7 @@ The MVP keeps the contract surface intentionally small:
 - `TezcatliWrappedToken.sol`: wraps an ERC-20 into confidential `FHERC20` balances
 - `TezcatliMigrator.sol`: sweeps approved funds from one or many stealth addresses and lands them directly in confidential wrapped balances
 - `TezcatliDustSwap.sol`: converts supported dust tokens into settlement USDC before shielding
-- `TezcatliSmartAccount.sol`: minimal programmable destination account with `execute`, `executeBatch`, and ERC-1271
+- `TezcatliSmartAccount.sol`: programmable destination account with owner calls, relayed `executeBySig` / `executeBatchBySig`, and ERC-1271
 - `TezcatliSmartAccountFactory.sol`: deterministic CREATE2 factory for smart-account deployment
 - `TezcatliEntryPointMock.sol`: minimal local EntryPoint for ERC-4337-style tests
 - `Tezcatli4337Account.sol`: simple account-abstraction smart account with `validateUserOp` and ERC-1271
@@ -22,6 +22,8 @@ The MVP keeps the contract surface intentionally small:
 - `TezcatliVaultCoordinator.sol`: operator-controlled coordinator for strategy deploy/redeem actions
 - `TezcatliStrategyAdapterERC4626.sol`: ERC-4626 adapter that isolates strategy interactions from vault logic
 - `TezcatliVaultFeeModel.sol`: bonding-curve fee model (5.00% -> 0.50%) across 3/6/12/18 month options
+- `TezcatliGmxPrivacyWrapper.sol`: stealth-signature relay wrapper for GMX `ExchangeRouter.multicall(...)` order submission
+- `MockGmxExchangeRouter.sol`: local mock used to test GMX-style multicall order routing
 
 ## Migration Model
 
@@ -65,7 +67,7 @@ The confidential vault + strategy orchestration pass is now included:
 
 - users deposit with `confidentialTransferAndCall(...)` into `TezcatliConfidentialVault`
 - vault shares are tracked as encrypted balances per account
-- withdrawals are requested with encrypted inputs and paid out as confidential token transfers
+- withdrawals are full-exit requests (no amount parameter) and paid out as confidential token transfers
 - vault includes `pause/unpause` and emergency recovery for non-asset ERC-20 tokens
 - `TezcatliVaultCoordinator` + `TezcatliStrategyAdapterERC4626` route funds into ERC-4626 strategies and back
 - strategy adapters can be configured per vault with risk buckets (`low`, `medium`, `high`) and allocation caps in bps
@@ -180,7 +182,7 @@ The test suite currently covers:
 - 4337 paymaster sponsorship for approved targets
 - paymaster rejections for unapproved targets and unapproved factories
 - confidential vault deposits through token callback
-- confidential vault withdrawals with encrypted inputs
+- confidential vault full-exit withdrawals with a 7-day minimum delay
 - vault pause controls and factory one-vault-per-asset enforcement
 - strategy routing through `TezcatliVaultCoordinator` and `TezcatliStrategyAdapterERC4626`
 - multi-strategy allocation cap enforcement by risk profile
@@ -190,6 +192,9 @@ The test suite currently covers:
 - post-migration confidential transfers
 - unshielding confidential funds back into the public ERC-20
 - permit validation
+- stealth-authorized GMX multicall relay with nonce/deadline replay protection and multicall-hash integrity checks
+- GMX wrapper fixed-leverage policy validation (`sizeUsd == collateralUsd * 2`) for 2x intents
+- relayer execution from session smart accounts via `executeBySig` / `executeBatchBySig`
 
 ## Notes
 
@@ -201,3 +206,11 @@ The test suite currently covers:
 - Dust swaps are deliberately modeled as a controlled onchain converter for MVP purposes. Replacing that with a DEX/aggregator route is a later hardening step.
 - NFTs are intentionally out of scope for this first pass.
 - The wrapped token uses `fhenix-confidential-contracts` to keep the confidentiality layer simple and close to ecosystem conventions.
+- The GMX wrapper is an MVP relay primitive: it protects signer identity with stealth authorization + relayer execution, but calldata to the GMX router is still public onchain.
+- The GMX wrapper enforces a 2x leverage policy at authorization level (`sizeUsd = collateralUsd * 2`). For hard onchain enforcement against malformed GMX payloads, add calldata decoding/validation for `createOrder(...)` fields in a next iteration.
+- Privacy options for GMX-style trading in this repo:
+- baseline relay: use `TezcatliGmxPrivacyWrapper` with stealth-signed authorization (single shared wrapper account on GMX)
+- account-per-session: deploy one `TezcatliSmartAccount` per trading session via CREATE2 salt and execute through `executeBySig`
+- metadata hardening: route with relayers and rotate salts / smart accounts frequently to reduce linkage
+- stronger anonymity set: batch users behind coordinated relayer windows (timing obfuscation)
+- network privacy (next step): private RPC / proxy transport so node operators cannot trivially correlate source IP with account activity
