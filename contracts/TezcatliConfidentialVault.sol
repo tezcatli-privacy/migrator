@@ -44,6 +44,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     address public feeRecipient;
     uint64 public minWithdrawDelay;
     uint256 public strategyShares;
+    bool public settlementPending;
     mapping(address => bool) public approvedStrategyAdapters;
     mapping(address => uint256) public strategySharesByAdapter;
 
@@ -63,6 +64,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     event FeeModelUpdated(address indexed previousFeeModel, address indexed newFeeModel);
     event FeeRecipientUpdated(address indexed previousFeeRecipient, address indexed newFeeRecipient);
     event MinWithdrawDelayUpdated(uint64 previousDelay, uint64 newDelay);
+    event SettlementPendingUpdated(bool status);
     event UserLockOptionConfigured(address indexed user, uint8 lockOption, uint64 startTimestamp);
     event YieldFeeCharged(address indexed user, address indexed feeRecipient, euint64 feeAmount, uint16 feeBps);
     event StrategyDeployed(address indexed adapter, uint64 assets, uint256 sharesOut);
@@ -85,6 +87,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     error WithdrawLocked(uint64 unlockAt);
     error StrategyPositionOpen();
     error InvalidAmount();
+    error SettlementPendingCritical();
 
     constructor(address asset_, address owner_) Ownable(owner_) {
         if (asset_ == address(0)) revert InvalidAsset();
@@ -154,6 +157,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
 
         uint64 unlockAt = _withdrawUnlockAtByUser[msg.sender];
         if (unlockAt > 0 && block.timestamp < unlockAt) revert WithdrawLocked(unlockAt);
+        if (settlementPending) revert SettlementPendingCritical();
         if (strategyShares != 0) revert StrategyPositionOpen();
         if (!_hasActivePosition[msg.sender]) revert InvalidAmount();
 
@@ -209,6 +213,11 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         address previousCoordinator = coordinator;
         coordinator = newCoordinator;
         emit CoordinatorUpdated(previousCoordinator, newCoordinator);
+    }
+
+    function setSettlementPending(bool status) external onlyCoordinator {
+        settlementPending = status;
+        emit SettlementPendingUpdated(status);
     }
 
     function setStrategyAdapter(address newStrategyAdapter) external onlyOwner {

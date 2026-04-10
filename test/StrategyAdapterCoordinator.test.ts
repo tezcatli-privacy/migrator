@@ -235,4 +235,103 @@ describe("Tezcatli strategy adapter and coordinator", function () {
       ),
     ).to.be.revertedWithCustomError(coordinator, "AllocationExceeded");
   });
+
+  it("enforces risk policy checks in coordinator execution", async function () {
+    const { deployer, operator, user, usdc, wrappedToken, vault, coordinator, adapter, userClient } = await loadFixture(deployFixture);
+
+    const RiskPolicy = await hre.ethers.getContractFactory("TezcatliStrategyRiskPolicy");
+    const riskPolicy = await RiskPolicy.deploy(deployer.address);
+    await riskPolicy.waitForDeployment();
+
+    await (await coordinator.setRiskPolicy(await riskPolicy.getAddress())).wait();
+    await (await riskPolicy.setPolicy(
+      await vault.getAddress(),
+      await adapter.getAddress(),
+      true,
+      10_000,
+      100,
+      3600,
+      20_000,
+      true,
+    )).wait();
+
+    const depositAmount = 30_000_000n;
+    const [encryptedDeposit] = await userClient
+      .encryptInputs([Encryptable.uint64(depositAmount)])
+      .setAccount(user.address)
+      .execute();
+
+    await wrappedToken
+      .connect(user)
+      ["confidentialTransferAndCall(address,(uint256,uint8,uint8,bytes),bytes)"](
+        await vault.getAddress(),
+        encryptedDeposit,
+        hre.ethers.AbiCoder.defaultAbiCoder().encode(["address"], [user.address]),
+      );
+
+    await expect(
+      coordinator.connect(operator).deployToStrategyWithPolicy(
+        await vault.getAddress(),
+        await adapter.getAddress(),
+        10_000_000,
+        10_000_000,
+        9_800_000,
+        20_000,
+      ),
+    ).to.be.revertedWithCustomError(riskPolicy, "SlippageExceeded");
+
+    await expect(
+      coordinator.connect(operator).deployToStrategyWithPolicy(
+        await vault.getAddress(),
+        await adapter.getAddress(),
+        10_000_000,
+        10_000_000,
+        9_950_000,
+        25_000,
+      ),
+    ).to.be.revertedWithCustomError(riskPolicy, "LeverageExceeded");
+
+    await coordinator.connect(operator).deployToStrategyWithPolicy(
+      await vault.getAddress(),
+      await adapter.getAddress(),
+      10_000_000,
+      10_000_000,
+      9_950_000,
+      20_000,
+    );
+    expect(await vault.strategyShares()).to.equal(10_000_000n);
+  });
+
+  it("tracks and clears critical settlement windows", async function () {
+    const { deployer, operator, vault, coordinator, adapter } = await loadFixture(deployFixture);
+
+    const RiskPolicy = await hre.ethers.getContractFactory("TezcatliStrategyRiskPolicy");
+    const riskPolicy = await RiskPolicy.deploy(deployer.address);
+    await riskPolicy.waitForDeployment();
+
+    await (await coordinator.setRiskPolicy(await riskPolicy.getAddress())).wait();
+    await (await riskPolicy.setPolicy(
+      await vault.getAddress(),
+      await adapter.getAddress(),
+      true,
+      10_000,
+      500,
+      3600,
+      0,
+      false,
+    )).wait();
+
+    await coordinator.connect(operator).startCriticalSettlement(await vault.getAddress(), await adapter.getAddress());
+    expect(await vault.settlementPending()).to.equal(true);
+    expect(await coordinator.pendingSettlementCountByVault(await vault.getAddress())).to.equal(1n);
+    expect(await coordinator.isCriticalSettlementOverdue(await vault.getAddress(), await adapter.getAddress())).to.equal(false);
+
+    await expect(
+      coordinator.connect(operator).startCriticalSettlement(await vault.getAddress(), await adapter.getAddress()),
+    ).to.be.revertedWithCustomError(coordinator, "SettlementPending");
+
+    await coordinator.connect(operator).clearCriticalSettlement(await vault.getAddress(), await adapter.getAddress());
+    expect(await vault.settlementPending()).to.equal(false);
+    expect(await coordinator.pendingSettlementCountByVault(await vault.getAddress())).to.equal(0n);
+  });
 });

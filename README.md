@@ -21,6 +21,8 @@ The MVP keeps the contract surface intentionally small:
 - `TezcatliConfidentialVaultFactory.sol`: one-vault-per-asset factory for confidential vault deployment
 - `TezcatliVaultCoordinator.sol`: operator-controlled coordinator for strategy deploy/redeem actions
 - `TezcatliStrategyAdapterERC4626.sol`: ERC-4626 adapter that isolates strategy interactions from vault logic
+- `TezcatliStrategyAdapterAaveV3.sol`: Aave V3 adapter for USDC-style settlement assets (with proportional yield redemption)
+- `TezcatliStrategyRiskPolicy.sol`: per-vault/per-strategy risk policy engine enforced by the coordinator
 - `TezcatliVaultFeeModel.sol`: bonding-curve fee model (5.00% -> 0.50%) across 3/6/12/18 month options
 - `TezcatliGmxPrivacyWrapper.sol`: stealth-signature relay wrapper for GMX `ExchangeRouter.multicall(...)` order submission
 - `MockGmxExchangeRouter.sol`: local mock used to test GMX-style multicall order routing
@@ -71,9 +73,11 @@ The confidential vault + strategy orchestration pass is now included:
 - vault includes `pause/unpause` and emergency recovery for non-asset ERC-20 tokens
 - `TezcatliVaultCoordinator` + `TezcatliStrategyAdapterERC4626` route funds into ERC-4626 strategies and back
 - strategy adapters can be configured per vault with risk buckets (`low`, `medium`, `high`) and allocation caps in bps
+- strategy execution can be policy-gated in coordinator with max allocation, max slippage, max pending-time and optional leverage caps
 - vault fee model supports 4 lock options (3/6/12/18 months) with a time-decay fee curve from 5.00% to floor fee
 - withdrawals are gated by a minimum 7-day delay from latest deposit activity (MVP liquidity constraint)
 - fee is charged only on realized yield in the opt-in lock flow; principal is not charged
+- vault withdrawals are also blocked during coordinator-marked critical settlement windows
 
 Current vault limitation:
 
@@ -81,6 +85,7 @@ Current vault limitation:
 - minimum withdrawal delay is currently user-level and resets on each new deposit
 - when lock-fee mode is used, strategy positions should be redeemed before user withdrawals so payout liquidity is settled on-vault
 - allocation caps are enforced against the currently managed strategy set (not full vault TVL including idle confidential liquidity)
+- critical settlement windows are operator-managed signals in coordinator; automation/watchers are still needed for production-grade incident handling
 
 ## CoFHE Encrypted Input Account
 
@@ -187,6 +192,9 @@ The test suite currently covers:
 - strategy routing through `TezcatliVaultCoordinator` and `TezcatliStrategyAdapterERC4626`
 - multi-strategy allocation cap enforcement by risk profile
 - lock-option fee decay and yield-only fee charging behavior
+- risk-policy validation in coordinator (slippage + leverage + allocation checks)
+- critical settlement start/clear workflow between coordinator and vault
+- Aave V3 adapter deposit/redeem behavior with proportional yield accounting
 - end-to-end paymaster-sponsored confidential transfer after migration to a 4337 account
 - recipient-side decryption with `decryptForView(...)`
 - post-migration confidential transfers
@@ -208,6 +216,7 @@ The test suite currently covers:
 - The wrapped token uses `fhenix-confidential-contracts` to keep the confidentiality layer simple and close to ecosystem conventions.
 - The GMX wrapper is an MVP relay primitive: it protects signer identity with stealth authorization + relayer execution, but calldata to the GMX router is still public onchain.
 - The GMX wrapper enforces a 2x leverage policy at authorization level (`sizeUsd = collateralUsd * 2`). For hard onchain enforcement against malformed GMX payloads, add calldata decoding/validation for `createOrder(...)` fields in a next iteration.
+- Async settlement rationale (why it exists): some integrations (for example orderbook/perps execution) are not atomically finalized in one transaction. The coordinator now supports critical settlement flags so vault withdrawals can pause until settlement state is resolved.
 - Privacy options for GMX-style trading in this repo:
 - baseline relay: use `TezcatliGmxPrivacyWrapper` with stealth-signed authorization (single shared wrapper account on GMX)
 - account-per-session: deploy one `TezcatliSmartAccount` per trading session via CREATE2 salt and execute through `executeBySig`
