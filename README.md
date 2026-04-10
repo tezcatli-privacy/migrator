@@ -17,6 +17,8 @@ The MVP keeps the contract surface intentionally small:
 - `Tezcatli4337Account.sol`: simple account-abstraction smart account with `validateUserOp` and ERC-1271
 - `Tezcatli4337AccountFactory.sol`: deterministic factory for the 4337 account
 - `TezcatliPaymaster.sol`: target-restricted ERC-20 fee paymaster for sponsored user operations
+- `TezcatliConfidentialVault.sol`: confidential deposit/withdraw vault using callback-based FHERC20 deposits
+- `TezcatliConfidentialVaultFactory.sol`: one-vault-per-asset factory for confidential vault deployment
 
 ## Migration Model
 
@@ -55,6 +57,17 @@ This first pass is intentionally conservative:
 - dust swaps use a simple whitelisted rate-based contract, not a live DEX router
 
 That last point matters. A secure migrator should not accept an encrypted amount it cannot verify against the public sweep amount. Full amount privacy during migration needs a batching or aggregation layer on top of the stealth intake, which is a later step.
+
+The first confidential vault pass is now included:
+
+- users deposit with `confidentialTransferAndCall(...)` into `TezcatliConfidentialVault`
+- vault shares are tracked as encrypted balances per account
+- withdrawals are requested with encrypted inputs and paid out as confidential token transfers
+- vault includes `pause/unpause` and emergency recovery for non-asset ERC-20 tokens
+
+Current vault limitation:
+
+- this version focuses on confidential accounting and custody; strategy adapters (Aave/Compound/Lido settlement) are not wired yet
 
 ## CoFHE Encrypted Input Account
 
@@ -155,6 +168,9 @@ The test suite currently covers:
 - smart-account outbound confidential transfer via `execute(...)`
 - 4337 paymaster sponsorship for approved targets
 - paymaster rejections for unapproved targets and unapproved factories
+- confidential vault deposits through token callback
+- confidential vault withdrawals with encrypted inputs
+- vault pause controls and factory one-vault-per-asset enforcement
 - end-to-end paymaster-sponsored confidential transfer after migration to a 4337 account
 - recipient-side decryption with `decryptForView(...)`
 - post-migration confidential transfers

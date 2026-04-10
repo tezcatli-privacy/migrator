@@ -68,10 +68,18 @@ task("deploy-migrator-stack", "Deploy the Tezcatli wallet migrator MVP").setActi
     );
     await paymaster.waitForDeployment();
 
+    const VaultFactory = await ethers.getContractFactory("TezcatliConfidentialVaultFactory");
+    const vaultFactory = await VaultFactory.deploy(deployer.address);
+    await vaultFactory.waitForDeployment();
+
+    await (await vaultFactory.createVault(await wrappedToken.getAddress(), deployer.address)).wait();
+    const confidentialVaultAddress = await vaultFactory.vaultByAsset(await wrappedToken.getAddress());
+
     await (await paymaster.setApprovedTarget(await migrator.getAddress(), true)).wait();
     await (await paymaster.setApprovedTarget(await wrappedToken.getAddress(), true)).wait();
     await (await paymaster.setApprovedTarget(await dustSwap.getAddress(), true)).wait();
     await (await paymaster.setApprovedTarget(await mockUSDC.getAddress(), true)).wait();
+    await (await paymaster.setApprovedTarget(confidentialVaultAddress, true)).wait();
 
     await (await mockUSDC.mint(deployer.address, 2_000_000_000n)).wait();
     await (await mockUSDC.approve(await dustSwap.getAddress(), 1_000_000_000n)).wait();
@@ -95,6 +103,8 @@ task("deploy-migrator-stack", "Deploy the Tezcatli wallet migrator MVP").setActi
       TezcatliEntryPointMock: await entryPointMock.getAddress(),
       Tezcatli4337AccountFactory: await smart4337Factory.getAddress(),
       TezcatliPaymaster: await paymaster.getAddress(),
+      TezcatliConfidentialVaultFactory: await vaultFactory.getAddress(),
+      TezcatliConfidentialVault: confidentialVaultAddress,
     };
 
     for (const [name, address] of Object.entries(deployments)) {
