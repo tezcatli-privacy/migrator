@@ -2,6 +2,13 @@
 
 This project is the first CoFHE-based Tezcatli prototype: a wallet migrator that moves public ERC-20 balances into confidential balances using a stealth-style intake flow and an FHE-wrapped destination token.
 
+The contracts are organized by functional domain:
+
+- `contracts/confidential_migrator/`: stealth intake + migration (`TezcatliMigrator`, `TezcatliStealthRegistry`, `TezcatliStealthAnnouncer`, `TezcatliDustSwap`, `TezcatliWrappedToken`)
+- `contracts/confidential_defi/`: vaults + strategy routing + risk policy (`TezcatliConfidentialVault`, coordinator, adapters, fee model, GMX wrapper POC)
+- `contracts/confidential_accounts/`: smart accounts + userOp/paymaster primitives (`TezcatliSmartAccount`, `Tezcatli4337Account`, factories, `TezcatliPaymaster`, `TezcatliEntryPointMock`)
+- `contracts/mocks/`: local testing mocks (`MockUSDC`, `MockDustToken`, `MockYieldVault`, `MockAaveV3Pool`, `MockGmxExchangeRouter`, etc.)
+
 The MVP keeps the contract surface intentionally small:
 
 - `MockUSDC.sol`: a 6-decimal ERC-20 used for local testing
