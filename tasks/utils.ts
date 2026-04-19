@@ -7,14 +7,21 @@ import { getChainById } from '@cofhe/sdk/chains'
 
 // Directory to store deployed contract addresses
 const DEPLOYMENTS_DIR = path.join(__dirname, '../deployments')
+const SHARED_DEPLOYMENTS_DIR = path.join(__dirname, '../../shared/deployments')
 
 // Ensure the deployments directory exists
 if (!fs.existsSync(DEPLOYMENTS_DIR)) {
 	fs.mkdirSync(DEPLOYMENTS_DIR, { recursive: true })
 }
 
+if (!fs.existsSync(SHARED_DEPLOYMENTS_DIR)) {
+	fs.mkdirSync(SHARED_DEPLOYMENTS_DIR, { recursive: true })
+}
+
 // Helper to get deployment file path for a network
 const getDeploymentPath = (network: string) => path.join(DEPLOYMENTS_DIR, `${network}.json`)
+const getSharedManifestPath = (network: string) =>
+	path.join(SHARED_DEPLOYMENTS_DIR, `${network}.alpha.json`)
 
 // Helper to save deployment info
 export const saveDeployment = (network: string, contractName: string, address: string) => {
@@ -41,6 +48,50 @@ export const getDeployment = (network: string, contractName: string): string | n
 
 	const deployments = JSON.parse(fs.readFileSync(deploymentPath, 'utf8')) as Record<string, string>
 	return deployments[contractName] || null
+}
+
+export type SharedAlphaManifest = {
+	network: string
+	chainId: number
+	updatedAt: string
+	compliance?: Record<string, unknown>
+	migrator?: Record<string, unknown>
+}
+
+export const loadSharedManifest = (network: string): SharedAlphaManifest | null => {
+	const manifestPath = getSharedManifestPath(network)
+	if (!fs.existsSync(manifestPath)) {
+		return null
+	}
+	return JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as SharedAlphaManifest
+}
+
+export const saveSharedManifest = (
+	network: string,
+	chainId: number,
+	section: 'compliance' | 'migrator',
+	payload: Record<string, unknown>
+) => {
+	const manifestPath = getSharedManifestPath(network)
+	const current = loadSharedManifest(network) ?? {
+		network,
+		chainId,
+		updatedAt: new Date().toISOString(),
+	}
+
+	const next: SharedAlphaManifest = {
+		...current,
+		network,
+		chainId,
+		updatedAt: new Date().toISOString(),
+		[section]: {
+			...(current[section] ?? {}),
+			...payload,
+		},
+	}
+
+	fs.writeFileSync(manifestPath, JSON.stringify(next, null, 2))
+	console.log(`Shared alpha manifest saved to ${manifestPath}`)
 }
 
 // Helper to create a cofhe SDK client that works on both local hardhat and real networks

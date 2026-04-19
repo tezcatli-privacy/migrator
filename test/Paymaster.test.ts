@@ -29,6 +29,10 @@ describe("Tezcatli paymaster", function () {
     );
     await paymaster.waitForDeployment();
 
+    const MockComplianceGate = await hre.ethers.getContractFactory("MockComplianceGate");
+    const complianceGate = await MockComplianceGate.deploy();
+    await complianceGate.waitForDeployment();
+
     const Target = await hre.ethers.getContractFactory("MockTarget");
     const target = await Target.deploy();
     await target.waitForDeployment();
@@ -53,6 +57,7 @@ describe("Tezcatli paymaster", function () {
       entryPoint,
       accountFactory,
       paymaster,
+      complianceGate,
       target,
       account,
       accountAddress,
@@ -190,5 +195,74 @@ describe("Tezcatli paymaster", function () {
 
     await expect(entryPoint.handleOps([userOp], treasury.address))
       .to.be.revertedWithCustomError(paymaster, "UnapprovedFactory");
+  });
+
+  it("rejects sponsored calls when compliance gate denies the wallet", async function () {
+    const { owner, treasury, entryPoint, paymaster, complianceGate, target, account, accountAddress } = await loadFixture(deployFixture);
+
+    await (await paymaster.setComplianceGate(await complianceGate.getAddress())).wait();
+    await (await paymaster.setComplianceEnabled(true)).wait();
+    await (await complianceGate.setShieldDecision(false, 2)).wait();
+
+    const userOp = {
+      sender: accountAddress,
+      nonce: 0n,
+      initCode: "0x",
+      callData: account.interface.encodeFunctionData("execute", [
+        await target.getAddress(),
+        0,
+        target.interface.encodeFunctionData("ping", [17]),
+      ]),
+      accountGasLimits: hre.ethers.ZeroHash,
+      preVerificationGas: 0n,
+      gasFees: hre.ethers.ZeroHash,
+      paymasterAndData: buildPaymasterAndData(await paymaster.getAddress(), 100_000n),
+      signature: "0x",
+    };
+
+    const userOpHash = await entryPoint.getUserOpHash(userOp);
+    userOp.signature = await owner.signMessage(hre.ethers.getBytes(userOpHash));
+
+    await expect(entryPoint.handleOps([userOp], treasury.address))
+      .to.be.revertedWithCustomError(paymaster, "ComplianceRejected")
+      .withArgs(2);
+  });
+
+  it("keeps report-only compliance decisions non-blocking", async function () {
+    const { owner, treasury, usdc, entryPoint, paymaster, complianceGate, target, account, accountAddress } = await loadFixture(deployFixture);
+
+    await (await paymaster.setComplianceGate(await complianceGate.getAddress())).wait();
+    await (await paymaster.setComplianceEnabled(true)).wait();
+    await (await complianceGate.setShieldDecision(true, 7)).wait();
+
+    const transferAmount = 320_000n;
+    const paymasterAndData = buildPaymasterAndData(await paymaster.getAddress(), transferAmount);
+    const callData = account.interface.encodeFunctionData("execute", [
+      await target.getAddress(),
+      0,
+      target.interface.encodeFunctionData("ping", [99]),
+    ]);
+
+    const userOp = {
+      sender: accountAddress,
+      nonce: 0n,
+      initCode: "0x",
+      callData,
+      accountGasLimits: hre.ethers.ZeroHash,
+      preVerificationGas: 0n,
+      gasFees: hre.ethers.ZeroHash,
+      paymasterAndData,
+      signature: "0x",
+    };
+
+    const userOpHash = await entryPoint.getUserOpHash(userOp);
+    userOp.signature = await owner.signMessage(hre.ethers.getBytes(userOpHash));
+
+    await expect(entryPoint.handleOps([userOp], treasury.address))
+      .to.emit(paymaster, "ComplianceReportRequired")
+      .withArgs(accountAddress, hre.ethers.ZeroHash, 7);
+
+    expect(await target.lastValue()).to.equal(99n);
+    expect(await usdc.balanceOf(treasury.address)).to.equal((transferAmount * 100n) / 10_000n);
   });
 });

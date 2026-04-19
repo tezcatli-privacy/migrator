@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
 interface ITezcatliWrappedToken {
     function underlyingToken() external view returns (address);
@@ -22,7 +23,11 @@ interface ITezcatliDustSwap {
     ) external returns (uint256 amountOut);
 }
 
-contract TezcatliMigrator is ReentrancyGuard {
+interface ITezcatliComplianceGate {
+    function canShield(address wallet, bytes32 periodTag, uint256 publicAmount) external view returns (bool, uint8);
+}
+
+contract TezcatliMigrator is ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
@@ -50,6 +55,8 @@ contract TezcatliMigrator is ReentrancyGuard {
     }
 
     mapping(address => uint256) public nonces;
+    bool public complianceEnabled;
+    address public complianceGate;
 
     event MigrationExecuted(
         address indexed stealthAddress,
@@ -66,6 +73,12 @@ contract TezcatliMigrator is ReentrancyGuard {
         uint256 dustAmount,
         uint256 settlementAmount
     );
+    event ComplianceGateUpdated(address indexed complianceGate, bool enabled);
+    event ComplianceReportRequired(address indexed recipient, bytes32 indexed periodTag, uint8 reasonCode);
+
+    error ComplianceRejected(uint8 reasonCode);
+
+    constructor() Ownable(msg.sender) {}
 
     function getSweepDigest(
         SweepAuthorization calldata authorization
@@ -135,6 +148,16 @@ contract TezcatliMigrator is ReentrancyGuard {
         _sweepSwapAndMigrate(authorization, signature);
     }
 
+    function setComplianceGate(address gate) external onlyOwner {
+        complianceGate = gate;
+        emit ComplianceGateUpdated(gate, complianceEnabled);
+    }
+
+    function setComplianceEnabled(bool enabled) external onlyOwner {
+        complianceEnabled = enabled;
+        emit ComplianceGateUpdated(complianceGate, enabled);
+    }
+
     function _sweepAndMigrate(
         SweepAuthorization calldata authorization,
         bytes calldata signature
@@ -157,6 +180,7 @@ contract TezcatliMigrator is ReentrancyGuard {
         IERC20 underlying = IERC20(wrappedToken.underlyingToken());
 
         require(address(underlying) == authorization.token, "Wrapper mismatch");
+        _checkCompliance(authorization.recipient, bytes32(0), authorization.amount);
 
         underlying.safeTransferFrom(
             authorization.stealthAddress,
@@ -218,6 +242,7 @@ contract TezcatliMigrator is ReentrancyGuard {
 
         require(settlementAmount > 0, "Zero settlement amount");
         require(settlementAmount <= type(uint64).max, "Settlement exceeds uint64");
+        _checkCompliance(authorization.recipient, bytes32(0), settlementAmount);
 
         settlementToken.forceApprove(authorization.confidentialToken, settlementAmount);
         wrappedToken.shieldTo(authorization.recipient, uint64(settlementAmount));
@@ -229,5 +254,16 @@ contract TezcatliMigrator is ReentrancyGuard {
             authorization.dustAmount,
             settlementAmount
         );
+    }
+
+    function _checkCompliance(address recipient, bytes32 periodTag, uint256 amount) internal {
+        if (!complianceEnabled || complianceGate == address(0)) return;
+        (bool allowed, uint8 reasonCode) = ITezcatliComplianceGate(complianceGate).canShield(recipient, periodTag, amount);
+        if (!allowed && reasonCode != 7) {
+            revert ComplianceRejected(reasonCode);
+        }
+        if (reasonCode == 7) {
+            emit ComplianceReportRequired(recipient, periodTag, reasonCode);
+        }
     }
 }

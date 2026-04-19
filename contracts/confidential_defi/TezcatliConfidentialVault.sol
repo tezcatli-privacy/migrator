@@ -34,6 +34,11 @@ interface ITezcatliFeeModel {
     function currentFeeBps(uint8 lockOption, uint64 startTimestamp, uint64 currentTimestamp) external pure returns (uint16);
 }
 
+interface ITezcatliVaultComplianceGate {
+    function canShield(address wallet, bytes32 periodTag, uint256 publicAmount) external view returns (bool, uint8);
+    function canUnshield(address wallet, bytes32 periodTag, uint256 publicAmount) external view returns (bool, uint8);
+}
+
 contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -45,6 +50,8 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     uint64 public minWithdrawDelay;
     uint256 public strategyShares;
     bool public settlementPending;
+    bool public complianceEnabled;
+    address public complianceGate;
     mapping(address => bool) public approvedStrategyAdapters;
     mapping(address => uint256) public strategySharesByAdapter;
 
@@ -65,6 +72,8 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     event FeeRecipientUpdated(address indexed previousFeeRecipient, address indexed newFeeRecipient);
     event MinWithdrawDelayUpdated(uint64 previousDelay, uint64 newDelay);
     event SettlementPendingUpdated(bool status);
+    event ComplianceGateUpdated(address indexed complianceGate, bool enabled);
+    event ComplianceReportRequired(address indexed account, bytes32 indexed periodTag, uint8 reasonCode, bool isUnshieldPath);
     event UserLockOptionConfigured(address indexed user, uint8 lockOption, uint64 startTimestamp);
     event YieldFeeCharged(address indexed user, address indexed feeRecipient, euint64 feeAmount, uint16 feeBps);
     event StrategyDeployed(address indexed adapter, uint64 assets, uint256 sharesOut);
@@ -88,6 +97,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     error StrategyPositionOpen();
     error InvalidAmount();
     error SettlementPendingCritical();
+    error ComplianceRejected(uint8 reasonCode);
 
     constructor(address asset_, address owner_) Ownable(owner_) {
         if (asset_ == address(0)) revert InvalidAsset();
@@ -123,6 +133,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
             }
         }
         if (beneficiary == address(0)) revert InvalidBeneficiary();
+        _checkShieldCompliance(beneficiary, bytes32(0), 1);
 
         (ebool userOk, euint64 newUserShares) = FHESafeMath.tryIncrease(_confidentialShares[beneficiary], amount);
         (ebool totalOk, euint64 newTotalShares) = FHESafeMath.tryIncrease(_totalConfidentialShares, amount);
@@ -160,6 +171,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         if (settlementPending) revert SettlementPendingCritical();
         if (strategyShares != 0) revert StrategyPositionOpen();
         if (!_hasActivePosition[msg.sender]) revert InvalidAmount();
+        _checkUnshieldCompliance(msg.sender, bytes32(0), 1);
 
         euint64 userShares = _confidentialShares[msg.sender];
         euint64 zero = FHE.asEuint64(0);
@@ -268,6 +280,16 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         uint64 previousDelay = minWithdrawDelay;
         minWithdrawDelay = newDelay;
         emit MinWithdrawDelayUpdated(previousDelay, newDelay);
+    }
+
+    function setComplianceGate(address newComplianceGate) external onlyOwner {
+        complianceGate = newComplianceGate;
+        emit ComplianceGateUpdated(newComplianceGate, complianceEnabled);
+    }
+
+    function setComplianceEnabled(bool enabled) external onlyOwner {
+        complianceEnabled = enabled;
+        emit ComplianceGateUpdated(complianceGate, enabled);
     }
 
     function coordinatorDeployToStrategy(
@@ -402,5 +424,23 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         ebool hasRemainder = FHE.gt(feeProduct, feeReconstructed);
         euint64 feeCeilDelta = FHE.select(hasRemainder, FHE.asEuint64(1), zero);
         feeAmount = FHE.add(feeFloor, feeCeilDelta);
+    }
+
+    function _checkShieldCompliance(address account, bytes32 periodTag, uint256 publicAmount) internal {
+        if (!complianceEnabled || complianceGate == address(0)) return;
+        (bool allowed, uint8 reasonCode) = ITezcatliVaultComplianceGate(complianceGate).canShield(account, periodTag, publicAmount);
+        if (!allowed && reasonCode != 7) revert ComplianceRejected(reasonCode);
+        if (reasonCode == 7) {
+            emit ComplianceReportRequired(account, periodTag, reasonCode, false);
+        }
+    }
+
+    function _checkUnshieldCompliance(address account, bytes32 periodTag, uint256 publicAmount) internal {
+        if (!complianceEnabled || complianceGate == address(0)) return;
+        (bool allowed, uint8 reasonCode) = ITezcatliVaultComplianceGate(complianceGate).canUnshield(account, periodTag, publicAmount);
+        if (!allowed && reasonCode != 7) revert ComplianceRejected(reasonCode);
+        if (reasonCode == 7) {
+            emit ComplianceReportRequired(account, periodTag, reasonCode, true);
+        }
     }
 }

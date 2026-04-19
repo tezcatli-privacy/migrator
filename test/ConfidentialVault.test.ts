@@ -28,6 +28,10 @@ describe("Tezcatli confidential vault", function () {
     const vault = await Vault.deploy(await wrappedToken.getAddress(), deployer.address);
     await vault.waitForDeployment();
 
+    const MockComplianceGate = await hre.ethers.getContractFactory("MockComplianceGate");
+    const complianceGate = await MockComplianceGate.deploy();
+    await complianceGate.waitForDeployment();
+
     const FeeModel = await hre.ethers.getContractFactory("TezcatliVaultFeeModel");
     const feeModel = await FeeModel.deploy();
     await feeModel.waitForDeployment();
@@ -48,6 +52,7 @@ describe("Tezcatli confidential vault", function () {
       usdc,
       wrappedToken,
       vault,
+      complianceGate,
       feeModel,
       userClient,
     };
@@ -254,5 +259,86 @@ describe("Tezcatli confidential vault", function () {
 
     await expect(factory.createVault(await wrappedToken.getAddress(), deployer.address))
       .to.be.revertedWithCustomError(factory, "VaultAlreadyExists");
+  });
+
+  it("blocks deposits when compliance gate denies shielding", async function () {
+    const { user, wrappedToken, vault, userClient, complianceGate } = await loadFixture(deployFixture);
+
+    await (await vault.setComplianceGate(await complianceGate.getAddress())).wait();
+    await (await vault.setComplianceEnabled(true)).wait();
+    await (await complianceGate.setShieldDecision(false, 2)).wait();
+
+    const [encryptedDeposit] = await userClient
+      .encryptInputs([Encryptable.uint64(2_000_000n)])
+      .setAccount(user.address)
+      .execute();
+
+    await expect(
+      wrappedToken
+        .connect(user)
+        ["confidentialTransferAndCall(address,(uint256,uint8,uint8,bytes),bytes)"](
+          await vault.getAddress(),
+          encryptedDeposit,
+          hre.ethers.AbiCoder.defaultAbiCoder().encode(["address"], [user.address]),
+        ),
+    ).to.be.revertedWithCustomError(vault, "ComplianceRejected").withArgs(2);
+  });
+
+  it("keeps threshold report-only decisions non-blocking on deposit and withdraw", async function () {
+    const { user, recipient, wrappedToken, vault, userClient, complianceGate } = await loadFixture(deployFixture);
+
+    await (await vault.setComplianceGate(await complianceGate.getAddress())).wait();
+    await (await vault.setComplianceEnabled(true)).wait();
+    await (await complianceGate.setShieldDecision(true, 7)).wait();
+    await (await complianceGate.setUnshieldDecision(true, 7)).wait();
+
+    const depositAmount = 5_000_000n;
+    const [encryptedDeposit] = await userClient
+      .encryptInputs([Encryptable.uint64(depositAmount)])
+      .setAccount(user.address)
+      .execute();
+
+    await expect(
+      wrappedToken
+        .connect(user)
+        ["confidentialTransferAndCall(address,(uint256,uint8,uint8,bytes),bytes)"](
+          await vault.getAddress(),
+          encryptedDeposit,
+          hre.ethers.AbiCoder.defaultAbiCoder().encode(["address"], [user.address]),
+        ),
+    )
+      .to.emit(vault, "ComplianceReportRequired")
+      .withArgs(user.address, hre.ethers.ZeroHash, 7, false);
+
+    await time.increase(7 * 24 * 60 * 60);
+    await expect(vault.connect(user).withdrawConfidential(recipient.address))
+      .to.emit(vault, "ComplianceReportRequired")
+      .withArgs(user.address, hre.ethers.ZeroHash, 7, true);
+  });
+
+  it("blocks withdraw when compliance gate denies unshielding", async function () {
+    const { user, wrappedToken, vault, userClient, complianceGate } = await loadFixture(deployFixture);
+
+    const depositAmount = 6_000_000n;
+    const [encryptedDeposit] = await userClient
+      .encryptInputs([Encryptable.uint64(depositAmount)])
+      .setAccount(user.address)
+      .execute();
+    await wrappedToken
+      .connect(user)
+      ["confidentialTransferAndCall(address,(uint256,uint8,uint8,bytes),bytes)"](
+        await vault.getAddress(),
+        encryptedDeposit,
+        hre.ethers.AbiCoder.defaultAbiCoder().encode(["address"], [user.address]),
+      );
+
+    await (await vault.setComplianceGate(await complianceGate.getAddress())).wait();
+    await (await vault.setComplianceEnabled(true)).wait();
+    await (await complianceGate.setUnshieldDecision(false, 2)).wait();
+
+    await time.increase(7 * 24 * 60 * 60);
+    await expect(vault.connect(user).withdrawConfidential(user.address))
+      .to.be.revertedWithCustomError(vault, "ComplianceRejected")
+      .withArgs(2);
   });
 });

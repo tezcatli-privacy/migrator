@@ -30,6 +30,7 @@ The MVP keeps the contract surface intentionally small:
 - `TezcatliStrategyAdapterERC4626.sol`: ERC-4626 adapter that isolates strategy interactions from vault logic
 - `TezcatliStrategyAdapterAaveV3.sol`: Aave V3 adapter for USDC-style settlement assets (with proportional yield redemption)
 - `TezcatliStrategyAdapterYearn.sol`: Yearn-style ERC-4626 adapter for USDC vault strategies
+- `TezcatliStrategyAdapterMorphoVault.sol`: Morpho Vault V1/V2 ERC-4626 adapter for confidential earn routing
 - `TezcatliStrategyRiskPolicy.sol`: per-vault/per-strategy risk policy engine enforced by the coordinator
 - `TezcatliVaultFeeModel.sol`: bonding-curve fee model (5.00% -> 0.50%) across 3/6/12/18 month options
 - `TezcatliGmxPrivacyWrapper.sol`: stealth-signature relay wrapper for GMX `ExchangeRouter.multicall(...)` order submission
@@ -130,6 +131,20 @@ pnpm test
 pnpm task:deploy
 ```
 
+### Redeploy the alpha USDC lane with real testnet USDC
+
+```bash
+pnpm task:redeploy-alpha-usdc-real-lane
+```
+
+This incremental task:
+
+- deploys a new `tzcUSDC` backed by the official Arbitrum Sepolia USDC
+- creates and configures a new confidential USDC vault on the existing alpha stack
+- deploys an Aave V3 adapter wired to the official Arbitrum Sepolia Aave USDC pool
+- deploys a Morpho-style mock vault plus `TezcatliStrategyAdapterMorphoVault`
+- updates the shared alpha manifest so the frontend/app uses the real USDC lane
+
 ### Run the demo migration task
 
 ```bash
@@ -204,6 +219,7 @@ The test suite currently covers:
 - critical settlement start/clear workflow between coordinator and vault
 - Aave V3 adapter deposit/redeem behavior with proportional yield accounting
 - Yearn adapter deposit/redeem behavior with yield accrual and slippage bounds
+- Morpho Vault adapter deposit/redeem behavior with ERC-4626 share accounting
 - end-to-end paymaster-sponsored confidential transfer after migration to a 4337 account
 - recipient-side decryption with `decryptForView(...)`
 - post-migration confidential transfers

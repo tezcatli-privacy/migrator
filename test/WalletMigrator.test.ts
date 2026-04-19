@@ -1,6 +1,6 @@
 import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import hre from "hardhat";
-import { Encryptable, FheTypes } from "@cofhe/sdk";
+import { Encryptable } from "@cofhe/sdk";
 import { PermitUtils } from "@cofhe/sdk/permits";
 import { expect } from "chai";
 
@@ -69,6 +69,11 @@ describe("Tezcatli wallet migrator", function () {
     );
   }
 
+  async function futureDeadline(seconds = 3600) {
+    const latest = await hre.ethers.provider.getBlock("latest");
+    return BigInt((latest?.timestamp ?? 0) + seconds);
+  }
+
   async function deployFixture() {
     await hre.run(TASK_COFHE_MOCKS_DEPLOY);
 
@@ -102,6 +107,10 @@ describe("Tezcatli wallet migrator", function () {
     const Migrator = await hre.ethers.getContractFactory("TezcatliMigrator");
     const migrator = await Migrator.deploy();
     await migrator.waitForDeployment();
+
+    const MockComplianceGate = await hre.ethers.getContractFactory("MockComplianceGate");
+    const complianceGate = await MockComplianceGate.deploy();
+    await complianceGate.waitForDeployment();
 
     const DustSwap = await hre.ethers.getContractFactory("TezcatliDustSwap");
     const dustSwap = await DustSwap.deploy(
@@ -149,7 +158,6 @@ describe("Tezcatli wallet migrator", function () {
       true,
     )).wait();
 
-    const deployerClient = await hre.cofhe.createClientWithBatteries(deployer);
     const stealthClient = await hre.cofhe.createClientWithBatteries(stealthSigner);
     const recipientClient = await hre.cofhe.createClientWithBatteries(recipient);
 
@@ -165,12 +173,12 @@ describe("Tezcatli wallet migrator", function () {
       registry,
       announcer,
       migrator,
+      complianceGate,
       dustSwap,
       smartAccountFactory,
       entryPoint,
       smart4337Factory,
       paymaster,
-      deployerClient,
       stealthClient,
       recipientClient,
     };
@@ -203,13 +211,13 @@ describe("Tezcatli wallet migrator", function () {
   });
 
   it("sweeps public funds from a stealth address into a confidential balance", async function () {
-    const { stealthSigner, recipient, usdc, wrappedToken, migrator, recipientClient } =
+    const { stealthSigner, recipient, usdc, wrappedToken, migrator } =
       await loadFixture(deployFixture);
 
     const amount = 25_000_000n;
     await usdc.connect(stealthSigner).approve(await migrator.getAddress(), amount);
 
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
     const nonce = await migrator.nonces(stealthSigner.address);
     const digest = await buildSweepDigest(
       await migrator.getAddress(),
@@ -243,20 +251,18 @@ describe("Tezcatli wallet migrator", function () {
     expect(await usdc.balanceOf(await wrappedToken.getAddress())).to.equal(amount);
 
     const recipientHandle = await wrappedToken.confidentialBalanceOf(recipient.address);
-    const decrypted = await recipientClient
-      .decryptForView(recipientHandle, FheTypes.Uint64)
-      .execute();
+    const decrypted = await hre.cofhe.mocks.getPlaintext(recipientHandle);
     expect(decrypted).to.equal(amount);
   });
 
   it("lets the recipient unshield confidential funds back to the underlying token", async function () {
-    const { stealthSigner, recipient, usdc, wrappedToken, migrator, recipientClient } =
+    const { stealthSigner, recipient, usdc, wrappedToken, migrator } =
       await loadFixture(deployFixture);
 
     const amount = 40_000_000n;
     await usdc.connect(stealthSigner).approve(await migrator.getAddress(), amount);
 
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
     const nonce = await migrator.nonces(stealthSigner.address);
     const digest = await buildSweepDigest(
       await migrator.getAddress(),
@@ -289,14 +295,12 @@ describe("Tezcatli wallet migrator", function () {
     expect(await usdc.balanceOf(recipient.address)).to.equal(15_000_000n);
 
     const handle = await wrappedToken.confidentialBalanceOf(recipient.address);
-    const decrypted = await recipientClient
-      .decryptForView(handle, FheTypes.Uint64)
-      .execute();
+    const decrypted = await hre.cofhe.mocks.getPlaintext(handle);
     expect(decrypted).to.equal(25_000_000n);
   });
 
   it("supports dust swaps into confidential USDC balances", async function () {
-    const { stealthSigner, recipient, dustToken, wrappedToken, migrator, dustSwap, recipientClient } =
+    const { stealthSigner, recipient, dustToken, wrappedToken, migrator, dustSwap } =
       await loadFixture(deployFixture);
 
     const dustAmount = 3_000_000_000_000_000_000n;
@@ -304,7 +308,7 @@ describe("Tezcatli wallet migrator", function () {
 
     await dustToken.connect(stealthSigner).approve(await migrator.getAddress(), dustAmount);
 
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
     const nonce = await migrator.nonces(stealthSigner.address);
     const digest = await buildDustSwapDigest(
       await migrator.getAddress(),
@@ -341,20 +345,18 @@ describe("Tezcatli wallet migrator", function () {
     expect(await wrappedToken.confidentialBalanceOf(recipient.address)).to.not.equal(hre.ethers.ZeroHash);
 
     const recipientHandle = await wrappedToken.confidentialBalanceOf(recipient.address);
-    const decrypted = await recipientClient
-      .decryptForView(recipientHandle, FheTypes.Uint64)
-      .execute();
+    const decrypted = await hre.cofhe.mocks.getPlaintext(recipientHandle);
     expect(decrypted).to.equal(6_000_000n);
   });
 
   it("supports confidential transfers after migration completes", async function () {
-    const { deployer, stealthSigner, recipient, usdc, wrappedToken, migrator, deployerClient, recipientClient } =
+    const { deployer, stealthSigner, recipient, usdc, wrappedToken, migrator, recipientClient } =
       await loadFixture(deployFixture);
 
     const amount = 30_000_000n;
     await usdc.connect(stealthSigner).approve(await migrator.getAddress(), amount);
 
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
     const nonce = await migrator.nonces(stealthSigner.address);
     const digest = await buildSweepDigest(
       await migrator.getAddress(),
@@ -392,15 +394,11 @@ describe("Tezcatli wallet migrator", function () {
       ["confidentialTransfer(address,(uint256,uint8,uint8,bytes))"](deployer.address, encryptedTransfer);
 
     const recipientHandle = await wrappedToken.confidentialBalanceOf(recipient.address);
-    const recipientBalance = await recipientClient
-      .decryptForView(recipientHandle, FheTypes.Uint64)
-      .execute();
+    const recipientBalance = await hre.cofhe.mocks.getPlaintext(recipientHandle);
     expect(recipientBalance).to.equal(23_000_000n);
 
     const deployerHandle = await wrappedToken.confidentialBalanceOf(deployer.address);
-    const received = await deployerClient
-      .decryptForView(deployerHandle, FheTypes.Uint64)
-      .execute();
+    const received = await hre.cofhe.mocks.getPlaintext(deployerHandle);
     expect(received).to.equal(7_000_000n);
   });
 
@@ -413,7 +411,6 @@ describe("Tezcatli wallet migrator", function () {
       wrappedToken,
       migrator,
       smartAccountFactory,
-      recipientClient,
     } = await loadFixture(deployFixture);
 
     const salt = 7n;
@@ -423,7 +420,7 @@ describe("Tezcatli wallet migrator", function () {
     const amount = 27_000_000n;
     await usdc.connect(stealthSigner).approve(await migrator.getAddress(), amount);
 
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
     const nonce = await migrator.nonces(stealthSigner.address);
     const digest = await buildSweepDigest(
       await migrator.getAddress(),
@@ -470,9 +467,7 @@ describe("Tezcatli wallet migrator", function () {
     );
 
     const recipientHandle = await wrappedToken.confidentialBalanceOf(recipient.address);
-    const recipientBalance = await recipientClient
-      .decryptForView(recipientHandle, FheTypes.Uint64)
-      .execute();
+    const recipientBalance = await hre.cofhe.mocks.getPlaintext(recipientHandle);
     expect(recipientBalance).to.equal(9_000_000n);
 
     const smartAccountHandle = await wrappedToken.confidentialBalanceOf(smartAccountAddress);
@@ -492,7 +487,6 @@ describe("Tezcatli wallet migrator", function () {
       entryPoint,
       smart4337Factory,
       paymaster,
-      recipientClient,
     } = await loadFixture(deployFixture);
 
     const salt = 17n;
@@ -503,7 +497,7 @@ describe("Tezcatli wallet migrator", function () {
     const migratedAmount = 27_000_000n;
     await usdc.connect(stealthSigner).approve(await migrator.getAddress(), migratedAmount);
 
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
     const nonce = await migrator.nonces(stealthSigner.address);
     const digest = await buildSweepDigest(
       await migrator.getAddress(),
@@ -581,9 +575,7 @@ describe("Tezcatli wallet migrator", function () {
     const treasuryAfter = await usdc.balanceOf(deployer.address);
 
     const recipientHandle = await wrappedToken.confidentialBalanceOf(recipient.address);
-    const recipientBalance = await recipientClient
-      .decryptForView(recipientHandle, FheTypes.Uint64)
-      .execute();
+    const recipientBalance = await hre.cofhe.mocks.getPlaintext(recipientHandle);
     expect(recipientBalance).to.equal(sponsoredTransferAmount);
 
     const smart4337Handle = await wrappedToken.confidentialBalanceOf(smart4337Address);
@@ -595,7 +587,7 @@ describe("Tezcatli wallet migrator", function () {
   });
 
   it("supports batching multiple stealth-address migrations in one call", async function () {
-    const { deployer, stealthSigner, secondStealthSigner, recipient, usdc, wrappedToken, migrator, deployerClient, recipientClient } =
+    const { deployer, stealthSigner, secondStealthSigner, recipient, usdc, wrappedToken, migrator } =
       await loadFixture(deployFixture);
 
     const firstAmount = 11_000_000n;
@@ -605,7 +597,7 @@ describe("Tezcatli wallet migrator", function () {
     await usdc.connect(secondStealthSigner).approve(await migrator.getAddress(), secondAmount);
 
     const chainId = BigInt((await hre.ethers.provider.getNetwork()).chainId);
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
 
     const firstNonce = await migrator.nonces(stealthSigner.address);
     const firstDigest = await buildSweepDigest(
@@ -668,15 +660,11 @@ describe("Tezcatli wallet migrator", function () {
     expect(await usdc.balanceOf(await wrappedToken.getAddress())).to.equal(firstAmount + secondAmount);
 
     const recipientHandle = await wrappedToken.confidentialBalanceOf(recipient.address);
-    const recipientBalance = await recipientClient
-      .decryptForView(recipientHandle, FheTypes.Uint64)
-      .execute();
+    const recipientBalance = await hre.cofhe.mocks.getPlaintext(recipientHandle);
     expect(recipientBalance).to.equal(firstAmount);
 
     const deployerHandle = await wrappedToken.confidentialBalanceOf(deployer.address);
-    const deployerBalance = await deployerClient
-      .decryptForView(deployerHandle, FheTypes.Uint64)
-      .execute();
+    const deployerBalance = await hre.cofhe.mocks.getPlaintext(deployerHandle);
     expect(deployerBalance).to.equal(secondAmount);
   });
 
@@ -686,6 +674,7 @@ describe("Tezcatli wallet migrator", function () {
     const permit = await stealthClient.permits.createSelf({
       issuer: stealthSigner.address,
       name: "Migration Permit",
+      expiration: 4_102_444_800,
     });
 
     const isValid = await PermitUtils.checkValidityOnChain(
@@ -694,5 +683,91 @@ describe("Tezcatli wallet migrator", function () {
     );
 
     expect(isValid).to.be.true;
+  });
+
+  it("blocks migration when compliance gate denies shielding", async function () {
+    const { stealthSigner, recipient, usdc, wrappedToken, migrator, complianceGate } = await loadFixture(deployFixture);
+
+    await (await migrator.setComplianceGate(await complianceGate.getAddress())).wait();
+    await (await migrator.setComplianceEnabled(true)).wait();
+    await (await complianceGate.setShieldDecision(false, 2)).wait();
+
+    const amount = 9_000_000n;
+    await usdc.connect(stealthSigner).approve(await migrator.getAddress(), amount);
+
+    const deadline = await futureDeadline();
+    const nonce = await migrator.nonces(stealthSigner.address);
+    const digest = await buildSweepDigest(
+      await migrator.getAddress(),
+      BigInt((await hre.ethers.provider.getNetwork()).chainId),
+      stealthSigner.address,
+      recipient.address,
+      await usdc.getAddress(),
+      await wrappedToken.getAddress(),
+      amount,
+      nonce,
+      deadline,
+    );
+    const signature = await stealthSigner.signMessage(hre.ethers.getBytes(digest));
+
+    await expect(
+      migrator.sweepAndMigrate(
+        {
+          stealthAddress: stealthSigner.address,
+          recipient: recipient.address,
+          token: await usdc.getAddress(),
+          confidentialToken: await wrappedToken.getAddress(),
+          amount,
+          nonce,
+          deadline,
+        },
+        signature,
+      ),
+    ).to.be.revertedWithCustomError(migrator, "ComplianceRejected").withArgs(2);
+  });
+
+  it("keeps threshold report-only compliance decisions non-blocking", async function () {
+    const { stealthSigner, recipient, usdc, wrappedToken, migrator, complianceGate } = await loadFixture(deployFixture);
+
+    await (await migrator.setComplianceGate(await complianceGate.getAddress())).wait();
+    await (await migrator.setComplianceEnabled(true)).wait();
+    await (await complianceGate.setShieldDecision(true, 7)).wait();
+
+    const amount = 8_000_000n;
+    await usdc.connect(stealthSigner).approve(await migrator.getAddress(), amount);
+
+    const deadline = await futureDeadline();
+    const nonce = await migrator.nonces(stealthSigner.address);
+    const digest = await buildSweepDigest(
+      await migrator.getAddress(),
+      BigInt((await hre.ethers.provider.getNetwork()).chainId),
+      stealthSigner.address,
+      recipient.address,
+      await usdc.getAddress(),
+      await wrappedToken.getAddress(),
+      amount,
+      nonce,
+      deadline,
+    );
+    const signature = await stealthSigner.signMessage(hre.ethers.getBytes(digest));
+
+    await expect(
+      migrator.sweepAndMigrate(
+        {
+          stealthAddress: stealthSigner.address,
+          recipient: recipient.address,
+          token: await usdc.getAddress(),
+          confidentialToken: await wrappedToken.getAddress(),
+          amount,
+          nonce,
+          deadline,
+        },
+        signature,
+      ),
+    )
+      .to.emit(migrator, "ComplianceReportRequired")
+      .withArgs(recipient.address, hre.ethers.ZeroHash, 7);
+
+    expect(await usdc.balanceOf(stealthSigner.address)).to.equal(492_000_000n);
   });
 });

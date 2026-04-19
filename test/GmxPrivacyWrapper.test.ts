@@ -36,6 +36,11 @@ describe("Tezcatli GMX privacy wrapper", function () {
     );
   }
 
+  async function futureDeadline(seconds = 3600) {
+    const latest = await hre.ethers.provider.getBlock("latest");
+    return BigInt((latest?.timestamp ?? 0) + seconds);
+  }
+
   async function deployFixture() {
     const [deployer, stealthSigner, relayer, orderVault] = await hre.ethers.getSigners();
 
@@ -88,7 +93,7 @@ describe("Tezcatli GMX privacy wrapper", function () {
       hre.ethers.AbiCoder.defaultAbiCoder().encode(["bytes[]"], [multicallData]),
     );
     const nonce = await wrapper.nonces(stealthSigner.address);
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
     const digest = await buildRelayDigest(
       await wrapper.getAddress(),
       BigInt((await hre.ethers.provider.getNetwork()).chainId),
@@ -149,7 +154,7 @@ describe("Tezcatli GMX privacy wrapper", function () {
       hre.ethers.AbiCoder.defaultAbiCoder().encode(["bytes[]"], [multicallData]),
     );
     const nonce = await wrapper.nonces(stealthSigner.address);
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
     const digest = await buildRelayDigest(
       await wrapper.getAddress(),
       BigInt((await hre.ethers.provider.getNetwork()).chainId),
@@ -210,7 +215,7 @@ describe("Tezcatli GMX privacy wrapper", function () {
       hre.ethers.AbiCoder.defaultAbiCoder().encode(["bytes[]"], [signedData]),
     );
     const nonce = await wrapper.nonces(stealthSigner.address);
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
     const digest = await buildRelayDigest(
       await wrapper.getAddress(),
       BigInt((await hre.ethers.provider.getNetwork()).chainId),
@@ -264,7 +269,7 @@ describe("Tezcatli GMX privacy wrapper", function () {
       hre.ethers.AbiCoder.defaultAbiCoder().encode(["bytes[]"], [multicallData]),
     );
     const nonce = await wrapper.nonces(stealthSigner.address);
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
     const digest = await buildRelayDigest(
       await wrapper.getAddress(),
       BigInt((await hre.ethers.provider.getNetwork()).chainId),
@@ -327,7 +332,7 @@ describe("Tezcatli GMX privacy wrapper", function () {
       hre.ethers.AbiCoder.defaultAbiCoder().encode(["bytes[]"], [multicallData]),
     );
     const nonce = await wrapper.nonces(stealthSigner.address);
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const deadline = await futureDeadline();
     const digest = await buildRelayDigest(
       await wrapper.getAddress(),
       BigInt((await hre.ethers.provider.getNetwork()).chainId),
