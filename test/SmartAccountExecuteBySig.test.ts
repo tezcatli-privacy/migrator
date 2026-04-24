@@ -1,6 +1,7 @@
 import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import hre from "hardhat";
 import { expect } from "chai";
+import { PermitUtils } from "@cofhe/sdk/permits";
 
 describe("Tezcatli smart account executeBySig", function () {
   async function deployFixture() {
@@ -141,5 +142,30 @@ describe("Tezcatli smart account executeBySig", function () {
         signature,
       ),
     ).to.be.revertedWith("Expired authorization");
+  });
+
+  it("validates a sharing permit issued by the smart account through ERC1271 owner signatures", async function () {
+    const { owner, sessionAccountAddress } = await loadFixture(deployFixture);
+
+    const { publicClient, walletClient } = await hre.cofhe.hardhatSignerAdapter(owner);
+    const sharingPermit = await PermitUtils.createSharingAndSign(
+      {
+        issuer: sessionAccountAddress,
+        recipient: owner.address,
+        name: "Smart account vault snapshot",
+        expiration: 4_102_444_800,
+      },
+      publicClient,
+      walletClient,
+    );
+
+    const recipientPermit = await PermitUtils.importSharedAndSign(
+      sharingPermit,
+      publicClient,
+      walletClient,
+    );
+
+    const isValid = await PermitUtils.checkValidityOnChain(recipientPermit, publicClient);
+    expect(isValid).to.be.true;
   });
 });
