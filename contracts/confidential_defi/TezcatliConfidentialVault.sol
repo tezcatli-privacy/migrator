@@ -56,12 +56,21 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     mapping(address => uint256) public strategySharesByAdapter;
 
     mapping(address => euint64) private _confidentialShares;
+    mapping(address => euint64) private _principalDepositedByUser;
+    mapping(address => euint64) private _grossPositionSnapshotByUser;
+    mapping(address => euint64) private _netPositionSnapshotByUser;
+    mapping(address => euint64) private _pendingYieldSnapshotByUser;
+    mapping(address => euint64) private _pendingFeeSnapshotByUser;
     euint64 private _totalConfidentialShares;
     mapping(address => uint8) private _lockOptionByUser;
     mapping(address => uint64) private _lockStartByUser;
     mapping(address => uint64) private _withdrawUnlockAtByUser;
     mapping(address => bool) private _hasLockOption;
     mapping(address => bool) private _hasActivePosition;
+    mapping(address => uint64) private _positionSnapshotUpdatedAtByUser;
+    address[] private _registeredStrategyAdapters;
+    mapping(address => bool) private _isRegisteredStrategyAdapter;
+    uint256 private _activePositionCount;
 
     event DepositRecorded(address indexed sender, address indexed beneficiary, euint64 amount);
     event WithdrawalExecuted(address indexed owner, address indexed recipient, euint64 amount);
@@ -135,17 +144,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         if (beneficiary == address(0)) revert InvalidBeneficiary();
         _checkShieldCompliance(beneficiary, bytes32(0), 1);
 
-        (ebool userOk, euint64 newUserShares) = FHESafeMath.tryIncrease(_confidentialShares[beneficiary], amount);
-        (ebool totalOk, euint64 newTotalShares) = FHESafeMath.tryIncrease(_totalConfidentialShares, amount);
-
-        _confidentialShares[beneficiary] = newUserShares;
-        _totalConfidentialShares = newTotalShares;
-        _withdrawUnlockAtByUser[beneficiary] = uint64(block.timestamp) + minWithdrawDelay;
-        _hasActivePosition[beneficiary] = true;
-
-        FHE.allowThis(newUserShares);
-        FHE.allow(newUserShares, beneficiary);
-        FHE.allowThis(newTotalShares);
+        ebool accepted = _recordDeposit(beneficiary, amount);
 
         if (lockOptionProvided) {
             if (feeModel == address(0)) revert InvalidFeeModel();
@@ -157,8 +156,8 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
             emit UserLockOptionConfigured(beneficiary, lockOption, uint64(block.timestamp));
         }
 
+        _refreshPositionSnapshot(beneficiary);
         emit DepositRecorded(from, beneficiary, amount);
-        ebool accepted = FHE.and(userOk, totalOk);
         FHE.allow(accepted, msg.sender);
         return accepted;
     }
@@ -174,6 +173,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         _checkUnshieldCompliance(msg.sender, bytes32(0), 1);
 
         euint64 userShares = _confidentialShares[msg.sender];
+        euint64 userPrincipal = _principalDepositedByUser[msg.sender];
         euint64 zero = FHE.asEuint64(0);
         euint64 payoutAmount;
         euint64 feeAmount = zero;
@@ -190,7 +190,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
                 uint64(block.timestamp)
             );
 
-            feeAmount = _computeYieldFeeCeil(grossAmount, userShares, feeBps);
+            feeAmount = _computeYieldFeeCeil(grossAmount, userPrincipal, feeBps);
             payoutAmount = FHE.sub(grossAmount, feeAmount);
         }
 
@@ -198,10 +198,14 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         euint64 newTotalShares;
         (, newTotalShares) = FHESafeMath.tryDecrease(totalShares, userShares);
         _confidentialShares[msg.sender] = newUserShares;
+        _principalDepositedByUser[msg.sender] = zero;
         _totalConfidentialShares = newTotalShares;
         _hasActivePosition[msg.sender] = false;
+        _activePositionCount -= 1;
         FHE.allowThis(newUserShares);
         FHE.allow(newUserShares, msg.sender);
+        FHE.allowThis(zero);
+        FHE.allow(zero, msg.sender);
         FHE.allowThis(newTotalShares);
 
         FHE.allowThis(payoutAmount);
@@ -217,6 +221,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
             euint64 protocolFee = ITezcatliConfidentialAsset(asset).confidentialTransfer(feeRecipient, feeAmount);
             emit YieldFeeCharged(msg.sender, feeRecipient, protocolFee, feeBps);
         }
+        _clearPositionSnapshot(msg.sender);
         FHE.allow(transferred, msg.sender);
         emit WithdrawalExecuted(msg.sender, recipient, transferred);
     }
@@ -235,6 +240,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
     function setStrategyAdapter(address newStrategyAdapter) external onlyOwner {
         if (newStrategyAdapter != address(0)) {
             _validateStrategyAdapter(newStrategyAdapter);
+            _registerStrategyAdapter(newStrategyAdapter);
             if (!approvedStrategyAdapters[newStrategyAdapter]) {
                 approvedStrategyAdapters[newStrategyAdapter] = true;
                 emit StrategyAdapterApprovalUpdated(newStrategyAdapter, true);
@@ -250,6 +256,7 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         if (adapter == address(0)) revert InvalidStrategyAdapter();
         if (approved) {
             _validateStrategyAdapter(adapter);
+            _registerStrategyAdapter(adapter);
         } else if (strategySharesByAdapter[adapter] != 0) {
             revert StrategyPositionOpen();
         }
@@ -362,6 +369,42 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         return _confidentialShares[account];
     }
 
+    function principalDepositedOf(address account) external view returns (euint64) {
+        return _principalDepositedByUser[account];
+    }
+
+    function grossPositionSnapshotOf(address account) external view returns (euint64) {
+        return _grossPositionSnapshotByUser[account];
+    }
+
+    function netPositionSnapshotOf(address account) external view returns (euint64) {
+        return _netPositionSnapshotByUser[account];
+    }
+
+    function pendingYieldSnapshotOf(address account) external view returns (euint64) {
+        return _pendingYieldSnapshotByUser[account];
+    }
+
+    function pendingFeeSnapshotOf(address account) external view returns (euint64) {
+        return _pendingFeeSnapshotByUser[account];
+    }
+
+    function hasActivePosition(address account) external view returns (bool) {
+        return _hasActivePosition[account];
+    }
+
+    function positionSnapshotUpdatedAt(address account) external view returns (uint64) {
+        return _positionSnapshotUpdatedAtByUser[account];
+    }
+
+    function registeredStrategyAdapters() external view returns (address[] memory) {
+        return _registeredStrategyAdapters;
+    }
+
+    function refreshPositionSnapshot(address account) external {
+        _refreshPositionSnapshot(account);
+    }
+
     function hasLockOption(address account) external view returns (bool) {
         return _hasLockOption[account];
     }
@@ -411,6 +454,123 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         if (adapter.settlementAsset() != expectedSettlementAsset) revert InvalidStrategyAdapter();
     }
 
+    function _recordDeposit(address beneficiary, euint64 amount) internal returns (ebool accepted) {
+        euint64 mintedShares = amount;
+        if (_activePositionCount != 0) {
+            euint64 totalAssetsBeforeDeposit = _estimatedTotalVaultAssetsBeforeDeposit(amount);
+            mintedShares = FHE.div(FHE.mul(amount, _totalConfidentialShares), totalAssetsBeforeDeposit);
+        }
+
+        (ebool userOk, euint64 updatedUserShares) = FHESafeMath.tryIncrease(_confidentialShares[beneficiary], mintedShares);
+        (ebool principalOk, euint64 updatedPrincipal) = FHESafeMath.tryIncrease(_principalDepositedByUser[beneficiary], amount);
+        (ebool totalOk, euint64 newTotalShares) = FHESafeMath.tryIncrease(_totalConfidentialShares, mintedShares);
+
+        _confidentialShares[beneficiary] = updatedUserShares;
+        _principalDepositedByUser[beneficiary] = updatedPrincipal;
+        _totalConfidentialShares = newTotalShares;
+        _withdrawUnlockAtByUser[beneficiary] = uint64(block.timestamp) + minWithdrawDelay;
+        if (!_hasActivePosition[beneficiary]) {
+            _activePositionCount += 1;
+        }
+        _hasActivePosition[beneficiary] = true;
+
+        FHE.allowThis(updatedUserShares);
+        FHE.allow(updatedUserShares, beneficiary);
+        FHE.allowThis(updatedPrincipal);
+        FHE.allow(updatedPrincipal, beneficiary);
+        FHE.allowThis(newTotalShares);
+
+        accepted = FHE.and(FHE.and(userOk, principalOk), totalOk);
+    }
+
+    function _registerStrategyAdapter(address adapter) internal {
+        if (_isRegisteredStrategyAdapter[adapter]) return;
+        _isRegisteredStrategyAdapter[adapter] = true;
+        _registeredStrategyAdapters.push(adapter);
+    }
+
+    function _estimatedTotalVaultAssetsBeforeDeposit(euint64 incomingAmount) internal returns (euint64 totalAssetsBeforeDeposit) {
+        totalAssetsBeforeDeposit = _estimatedTotalVaultAssets();
+        totalAssetsBeforeDeposit = FHE.sub(totalAssetsBeforeDeposit, incomingAmount);
+    }
+
+    function _estimatedTotalVaultAssets() internal returns (euint64 totalAssets) {
+        totalAssets = ITezcatliWrappedConfidentialAsset(asset).confidentialBalanceOf(address(this));
+
+        uint256 adaptersLength = _registeredStrategyAdapters.length;
+        for (uint256 i = 0; i < adaptersLength; i++) {
+            address adapter = _registeredStrategyAdapters[i];
+            if (strategySharesByAdapter[adapter] == 0) continue;
+
+            uint256 managedAssets = ITezcatliStrategyAdapter(adapter).totalManagedAssets();
+            if (managedAssets > type(uint64).max) revert InvalidAmount();
+            totalAssets = FHE.add(totalAssets, FHE.asEuint64(uint64(managedAssets)));
+        }
+    }
+
+    function _refreshPositionSnapshot(address account) internal {
+        euint64 zero = FHE.asEuint64(0);
+        euint64 principal = _principalDepositedByUser[account];
+
+        if (!_hasActivePosition[account]) {
+            _principalDepositedByUser[account] = principal;
+            _grossPositionSnapshotByUser[account] = zero;
+            _netPositionSnapshotByUser[account] = zero;
+            _pendingYieldSnapshotByUser[account] = zero;
+            _pendingFeeSnapshotByUser[account] = zero;
+            _positionSnapshotUpdatedAtByUser[account] = uint64(block.timestamp);
+            FHE.allowThis(zero);
+            FHE.allow(zero, account);
+            return;
+        }
+
+        euint64 grossAssets = FHE.div(
+            FHE.mul(_confidentialShares[account], _estimatedTotalVaultAssets()),
+            _totalConfidentialShares
+        );
+        euint64 pendingYield = _computePendingYield(grossAssets, principal);
+        euint64 pendingFee = zero;
+        euint64 netAssets = grossAssets;
+
+        if (_hasLockOption[account] && feeModel != address(0)) {
+            uint16 feeBps = ITezcatliFeeModel(feeModel).currentFeeBps(
+                _lockOptionByUser[account],
+                _lockStartByUser[account],
+                uint64(block.timestamp)
+            );
+            pendingFee = _computeYieldFeeCeil(grossAssets, principal, feeBps);
+            netAssets = FHE.sub(grossAssets, pendingFee);
+        }
+
+        _grossPositionSnapshotByUser[account] = grossAssets;
+        _netPositionSnapshotByUser[account] = netAssets;
+        _pendingYieldSnapshotByUser[account] = pendingYield;
+        _pendingFeeSnapshotByUser[account] = pendingFee;
+        _positionSnapshotUpdatedAtByUser[account] = uint64(block.timestamp);
+
+        FHE.allowThis(principal);
+        FHE.allow(principal, account);
+        FHE.allowThis(grossAssets);
+        FHE.allow(grossAssets, account);
+        FHE.allowThis(netAssets);
+        FHE.allow(netAssets, account);
+        FHE.allowThis(pendingYield);
+        FHE.allow(pendingYield, account);
+        FHE.allowThis(pendingFee);
+        FHE.allow(pendingFee, account);
+    }
+
+    function _clearPositionSnapshot(address account) internal {
+        euint64 zero = FHE.asEuint64(0);
+        _grossPositionSnapshotByUser[account] = zero;
+        _netPositionSnapshotByUser[account] = zero;
+        _pendingYieldSnapshotByUser[account] = zero;
+        _pendingFeeSnapshotByUser[account] = zero;
+        _positionSnapshotUpdatedAtByUser[account] = uint64(block.timestamp);
+        FHE.allowThis(zero);
+        FHE.allow(zero, account);
+    }
+
     function _computeYieldFeeCeil(euint64 grossAmount, euint64 principal, uint16 feeBps) internal returns (euint64 feeAmount) {
         euint64 zero = FHE.asEuint64(0);
         ebool hasYield = FHE.gte(grossAmount, principal);
@@ -424,6 +584,12 @@ contract TezcatliConfidentialVault is IFHERC20Receiver, Ownable, Pausable, Reent
         ebool hasRemainder = FHE.gt(feeProduct, feeReconstructed);
         euint64 feeCeilDelta = FHE.select(hasRemainder, FHE.asEuint64(1), zero);
         feeAmount = FHE.add(feeFloor, feeCeilDelta);
+    }
+
+    function _computePendingYield(euint64 grossAmount, euint64 principal) internal returns (euint64 pendingYield) {
+        euint64 zero = FHE.asEuint64(0);
+        ebool hasYield = FHE.gte(grossAmount, principal);
+        pendingYield = FHE.select(hasYield, FHE.sub(grossAmount, principal), zero);
     }
 
     function _checkShieldCompliance(address account, bytes32 periodTag, uint256 publicAmount) internal {

@@ -44,6 +44,7 @@ describe("Tezcatli confidential vault", function () {
     await (await wrappedToken.connect(user).shield(30_000_000n)).wait();
 
     const userClient = await hre.cofhe.createClientWithBatteries(user);
+    const otherClient = await hre.cofhe.createClientWithBatteries(other);
     return {
       deployer,
       user,
@@ -55,6 +56,7 @@ describe("Tezcatli confidential vault", function () {
       complianceGate,
       feeModel,
       userClient,
+      otherClient,
     };
   }
 
@@ -114,6 +116,65 @@ describe("Tezcatli confidential vault", function () {
 
     await expect(vault.connect(user).withdrawConfidential(recipient.address))
       .to.be.revertedWithCustomError(vault, "InvalidAmount");
+  });
+
+  it("tracks encrypted principal separately from proportional vault shares", async function () {
+    const { deployer, user, other, usdc, wrappedToken, vault, userClient, otherClient } = await loadFixture(deployFixture);
+
+    await (await usdc.mint(other.address, 100_000_000n)).wait();
+    await (await usdc.connect(other).approve(await wrappedToken.getAddress(), 100_000_000n)).wait();
+    await (await wrappedToken.connect(other).shield(30_000_000n)).wait();
+
+    const [userDeposit] = await userClient
+      .encryptInputs([Encryptable.uint64(10_000_000n)])
+      .setAccount(user.address)
+      .execute();
+
+    await wrappedToken
+      .connect(user)
+      ["confidentialTransferAndCall(address,(uint256,uint8,uint8,bytes),bytes)"](
+        await vault.getAddress(),
+        userDeposit,
+        hre.ethers.AbiCoder.defaultAbiCoder().encode(["address"], [user.address]),
+      );
+
+    await (await usdc.mint(deployer.address, 2_000_000n)).wait();
+    await (await usdc.connect(deployer).approve(await wrappedToken.getAddress(), 2_000_000n)).wait();
+    await (await wrappedToken.connect(deployer).shieldTo(await vault.getAddress(), 2_000_000n)).wait();
+
+    const [otherDeposit] = await otherClient
+      .encryptInputs([Encryptable.uint64(6_000_000n)])
+      .setAccount(other.address)
+      .execute();
+
+    await wrappedToken
+      .connect(other)
+      ["confidentialTransferAndCall(address,(uint256,uint8,uint8,bytes),bytes)"](
+        await vault.getAddress(),
+        otherDeposit,
+        hre.ethers.AbiCoder.defaultAbiCoder().encode(["address"], [other.address]),
+      );
+
+    await vault.refreshPositionSnapshot(user.address);
+    await vault.refreshPositionSnapshot(other.address);
+
+    const userPrincipalHandle = await vault.principalDepositedOf(user.address);
+    const otherPrincipalHandle = await vault.principalDepositedOf(other.address);
+    const userSharesHandle = await vault.confidentialSharesOf(user.address);
+    const otherSharesHandle = await vault.confidentialSharesOf(other.address);
+    const userGrossHandle = await vault.grossPositionSnapshotOf(user.address);
+    const otherGrossHandle = await vault.grossPositionSnapshotOf(other.address);
+    const userYieldHandle = await vault.pendingYieldSnapshotOf(user.address);
+    const otherYieldHandle = await vault.pendingYieldSnapshotOf(other.address);
+
+    expect(await userClient.decryptForView(userPrincipalHandle, FheTypes.Uint64).execute()).to.equal(10_000_000n);
+    expect(await otherClient.decryptForView(otherPrincipalHandle, FheTypes.Uint64).execute()).to.equal(6_000_000n);
+    expect(await userClient.decryptForView(userSharesHandle, FheTypes.Uint64).execute()).to.equal(10_000_000n);
+    expect(await otherClient.decryptForView(otherSharesHandle, FheTypes.Uint64).execute()).to.equal(5_000_000n);
+    expect(await userClient.decryptForView(userGrossHandle, FheTypes.Uint64).execute()).to.equal(12_000_000n);
+    expect(await otherClient.decryptForView(otherGrossHandle, FheTypes.Uint64).execute()).to.equal(6_000_000n);
+    expect(await userClient.decryptForView(userYieldHandle, FheTypes.Uint64).execute()).to.equal(2_000_000n);
+    expect(await otherClient.decryptForView(otherYieldHandle, FheTypes.Uint64).execute()).to.equal(0n);
   });
 
   it("enforces a 7-day minimum withdrawal delay", async function () {
