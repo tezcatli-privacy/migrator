@@ -20,7 +20,6 @@ task(
   }
 
   const migratorSection = manifest.migrator as Record<string, unknown>;
-  const vaultFactoryAddress = String(migratorSection.vaultFactory ?? "");
   const vaultCoordinatorAddress = String(migratorSection.vaultCoordinator ?? "");
   const vaultFeeModelAddress = String(migratorSection.vaultFeeModel ?? "");
   const migratorAddress = String(migratorSection.migrator ?? "");
@@ -28,7 +27,7 @@ task(
   const complianceGateAddress =
     typeof manifest.compliance?.gate === "string" ? manifest.compliance.gate : undefined;
 
-  if (!vaultFactoryAddress || !vaultCoordinatorAddress || !vaultFeeModelAddress || !migratorAddress || !paymasterAddress) {
+  if (!vaultCoordinatorAddress || !vaultFeeModelAddress || !migratorAddress || !paymasterAddress) {
     throw new Error("Shared alpha manifest is missing required migrator contract addresses");
   }
 
@@ -46,10 +45,12 @@ task(
   );
   await wrappedUsdc.waitForDeployment();
 
-  const vaultFactory = await ethers.getContractAt("TezcatliConfidentialVaultFactory", vaultFactoryAddress);
-  await (await vaultFactory.createVault(await wrappedUsdc.getAddress(), deployer.address)).wait();
-  const usdcVaultAddress = await vaultFactory.vaultByAsset(await wrappedUsdc.getAddress());
-  const usdcVault = await ethers.getContractAt("TezcatliConfidentialVault", usdcVaultAddress);
+  // Deploy the vault directly so the USDC lane always picks up the current vault bytecode.
+  // Reusing an old factory would keep instantiating the historical embedded vault implementation.
+  const Vault = await ethers.getContractFactory("TezcatliConfidentialVault");
+  const usdcVault = await Vault.deploy(await wrappedUsdc.getAddress(), deployer.address);
+  await usdcVault.waitForDeployment();
+  const usdcVaultAddress = await usdcVault.getAddress();
 
   await (await usdcVault.setCoordinator(vaultCoordinatorAddress)).wait();
   await (await usdcVault.setFeeModel(vaultFeeModelAddress)).wait();
